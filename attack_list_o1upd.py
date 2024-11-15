@@ -286,8 +286,12 @@ def train(
 
         # Restart optimizer if needed
         if restart_num > 0 and (iteration + 1) % restart_num == 0:
-            dec_img = my_haha_backprocessing(x_0 + x, device)
+            x_mod = (x_0 + x).clone().detach()
+            dec_img = my_haha_backprocessing(x_mod, device)
             x_0 = my_haha_preprocessing(Image.fromarray(dec_img), device)
+            torch.cuda.empty_cache()
+
+            # Reset optimizer
             if clamp_method == 'tanh':
                 p = torch.zeros(x_0.shape, requires_grad=True, device=device)
                 x = 0.1 * torch.tanh(p)
