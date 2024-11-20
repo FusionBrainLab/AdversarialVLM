@@ -167,6 +167,30 @@ class DifferentiableMllamaImageProcessor():
 
         return image
     
+    def pack_images(self, batch_images: List[List[torch.Tensor]]
+    ) -> Tuple[torch.Tensor, List[List[int]]]:
+        batch_size = len(batch_images)
+        max_num_images = max([len(images) for images in batch_images])
+        shapes = [image.shape for images in batch_images for image in images]
+        _, channels, tile_height, tile_width = shapes[0]
+
+        # Initialize the stacked images array with zeros
+        stacked_images = torch.zeros(
+            (batch_size, max_num_images, self.max_image_tiles, channels, tile_height, tile_width)
+        ).to(self.device)
+
+        # Fill the stacked images array with the tiled images from the batch
+        all_num_tiles = []
+        for i, images in enumerate(batch_images):
+            num_sample_tiles = []
+            for j, image in enumerate(images):
+                num_tiles = image.shape[0]
+                stacked_images[i, j, :num_tiles] = image
+                num_sample_tiles.append(num_tiles)
+            all_num_tiles.append(num_sample_tiles)
+
+        return stacked_images, all_num_tiles
+    
     def process(self, image: torch.Tensor) -> dict:
         """
         Process the input image into a format compatible with the LLaMA model.
@@ -197,6 +221,9 @@ class DifferentiableMllamaImageProcessor():
         
         image_tiles, channels, tile_height, tile_width = image.shape
         image = image.reshape(1, 1, image_tiles, channels, tile_height, tile_width)
+        
+        image, _ = self.pack_images(image)
+        
         # print(image.shape)
         
         # images: batch_size, max_num_images, max_image_tiles, channels, tile_height, tile_width
@@ -228,7 +255,7 @@ class DifferentiableMllamaImageProcessor():
         for image in image_list:
             data_list.append([self.process(image)["pixel_values"]])
 
-        images, num_tiles = pack_images(data_list, self.max_image_tiles)
+        images, num_tiles = self.pack_images(data_list, self.max_image_tiles)
 
         return {
             "pixel_values": images,
