@@ -12,7 +12,14 @@ from questions import not_safe_questions_test, questions
 
 model, processor = load_model_and_processor("alpindale/Llama-3.2-11B-Vision-Instruct", torch.device("cuda:7"))
 
-image_path = "/home/jovyan/rahmatullaev/adversarial/runs/airi_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241112_175855/optimized_image_iter_2001.png"
+image_path = "/home/jovyan/rahmatullaev/adversarial/runs/oxford_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_164351/optimized_image_iter_1801.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/0_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_172358/optimized_image_iter_2201.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/1_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_172532/optimized_image_iter_3401.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/2_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_172619/optimized_image_iter_1801.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/3_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_172827/optimized_image_iter_2001.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/4_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_173046/optimized_image_iter_2701.png"
+# "/home/jovyan/rahmatullaev/adversarial/runs/oxford_tanh_Llama3.2-3-11B-Vision_start_added_unsafe_questions_20241120_164351/optimized_image_iter_1101.png"
+
 
 original_image = Image.open(image_path)
 original_tensor = np.fromfile(image_path[:-4] + ".bin")

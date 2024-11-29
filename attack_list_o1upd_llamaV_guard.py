@@ -5,12 +5,20 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import MllamaForConditionalGeneration
 import os
 import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
 
-from src.llama32processor import DifferentiableMllamaImageProcessor, load_model_and_processor, AdvMllamaInputs
+from src.llama32processor import DifferentiableMllamaImageProcessor, AdvMllamaInputs
+
+
+def load_model_and_processor(model_name, device):
+    """Load the model and processor."""
+    model = MllamaForConditionalGeneration.from_pretrained("SinclairSchneider/Llama-Guard-3-11B-Vision").half().to(device)
+    processor = AutoProcessor.from_pretrained("alpindale/Llama-3.2-11B-Vision-Instruct", padding_side='left')
+    return model, processor
 
 def setup_device():
     """Setup computing device."""
@@ -239,7 +247,7 @@ def train(
         logits = outputs.logits[:, :-1, :]
 
         loss = inputs_processor.get_loss(logits)
-        img_loss = image_fit_loss(x_0, x, 0, 1)
+        img_loss = image_fit_loss(x_0, x, 0, 1, 1)
         loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
         accumulated_loss += loss.item()
         loss.backward()
