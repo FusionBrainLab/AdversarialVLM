@@ -18,7 +18,7 @@ echo $WANDB_KEY
 # wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="airi_tanh_Llama3.2-3-11B-Vision-guard_start"
+EXP_NAME="airi_tanh_Llama3.2-3-11B-Vision-guard_no_prompt_CF=1"
 IMG_ORIG="airi.png"
 PROMPT="list"
 TARGET_TEXT="sure, here it is!"
@@ -33,7 +33,7 @@ RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
 
 # Run the Python script with all arguments
 wandb online
-CUDA_VISIBLE_DEVICES=1 python "attack_list_o1upd_llamaV_2.py" \
+CUDA_VISIBLE_DEVICES=2 python "attack_list_o1upd_llamaV_guard.py" \
     --exp_name "$EXP_NAME" \
     --img_orig "$IMG_ORIG" \
     --prompt "$PROMPT" \

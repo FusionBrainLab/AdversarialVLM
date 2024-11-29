@@ -132,9 +132,14 @@ def train(
     adv_processor = DifferentiableQwen2VLImageProcessor(processor.image_processor, device)
 
     # Preprocess images and prepare tensors
-    original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    if os.path.exists(img_orig):
+        original_image = Image.open(img_orig).convert("RGB")
+    elif os.path.exists(os.path.join("./images", img_orig)):
+        original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    else:
+        raise FileNotFoundError(f"Cannot find {img_orig}")
     print("Original image size: ", original_image.size)
-    x_0 = adv_processor.pil_to_tensor(original_image).to(device)
+    x_0 = adv_processor.pil_to_tensor(original_image, resize=False).to(device)
     print("New tensor size: ", x_0.shape)
     
     # white = Image.fromarray(np.ones(original_image.size, dtype=np.uint8) * 255)
@@ -209,9 +214,7 @@ def train(
         device=device, 
         target_text=target_text)
 
-    # Training loop without outer loop over questions
     for iteration in tqdm(range(num_iterations)):
-        # Sample batch of questions
         inputs = inputs_processor.get_inputs_train()
         #inputs = processor(text=prompts, images=[original_image for _ in batch_questions], return_tensors="pt", padding=True).to(device)
         
@@ -328,7 +331,6 @@ def train(
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
             inputs_for_inference = inputs_processor.get_inputs_inference(img)
-            
             
             outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
             # Decode the generated output from the model

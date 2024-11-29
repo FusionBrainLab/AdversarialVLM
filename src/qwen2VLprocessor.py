@@ -104,10 +104,12 @@ class DifferentiableQwen2VLImageProcessor():
         orig_processor : 
         
         """
-        self.image_mean = torch.tensor(orig_processor.image_mean).view(-1, 1, 1).to(device)
-        self.image_std = torch.tensor(orig_processor.image_std).view(-1, 1, 1).to(device)
         self.orig_processor = orig_processor
         self.device = device
+        
+        self.image_mean = torch.tensor(orig_processor.image_mean).view(-1, 1, 1).to(device)
+        self.image_std = torch.tensor(orig_processor.image_std).view(-1, 1, 1).to(device)
+
         self.do_convert_rgb = orig_processor.do_convert_rgb
         self.patch_size = orig_processor.patch_size
         self.merge_size = orig_processor.merge_size
