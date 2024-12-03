@@ -151,7 +151,7 @@ class DifferentiableMllamaImageProcessor():
         self.max_image_tiles = orig_processor.max_image_tiles
         self.rescale_factor = orig_processor.rescale_factor
 
-    def pil_to_tensor(self, image: PIL.Image, resize: bool = True) -> torch.Tensor:
+    def pil_to_tensor(self, image: PIL.Image, resize: bool = False) -> torch.Tensor:
         """
         Convert a PIL image to a tensor.
 
