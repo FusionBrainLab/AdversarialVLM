@@ -10,17 +10,11 @@ import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
 
-from src.phi3processor import DifferentiablePhi3VImageProcessor, batch_processing
+from processors import load_components
 
 def setup_device():
     """Setup computing device."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def load_model_and_processor(model_name, device):
-    """Load the model and processor."""
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).half().to(device)
-    processor = AutoProcessor.from_pretrained(model_name, num_crops=6, padding_side='left', trust_remote_code=True)
-    return model, processor
 
 def create_directory(exp_name, base_path="./runs"):
     """Creates a directory for experiment logs and outputs."""
@@ -124,8 +118,8 @@ def train(
     start_from_white      # Added for starting from white image
     ):
     """Train the model on the given image with specific settings."""
-    from questions import questions
-    questions = questions
+    from questions import questions, not_safe_questions, not_safe_questions_test
+    questions = not_safe_questions + questions 
     if prompt != "list":
         questions = [prompt]
 
@@ -134,13 +128,19 @@ def train(
     exp_path = create_directory(exp_name)
 
     # Load model and processor
+    load_model_and_processor, AdvInputs, DifferentiableImageProcessor = load_components(model_name)
     model, processor = load_model_and_processor(model_name, device)
-    adv_processor = DifferentiablePhi3VImageProcessor(processor.image_processor, device)
+    adv_processor = DifferentiableImageProcessor(processor.image_processor, device)
 
     # Preprocess images and prepare tensors
-    original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    if os.path.exists(img_orig):
+        original_image = Image.open(img_orig).convert("RGB")
+    elif os.path.exists(os.path.join("./images", img_orig)):
+        original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    else:
+        raise FileNotFoundError(f"Cannot find {img_orig}")
     print("Original image size: ", original_image.size)
-    x_0 = adv_processor.pil_to_tensor(original_image).to(device)
+    x_0 = adv_processor.pil_to_tensor(original_image, resize=False).to(device)
     print("New tensor size: ", x_0.shape)
     
     # white = Image.fromarray(np.ones(original_image.size, dtype=np.uint8) * 255)
@@ -205,19 +205,19 @@ def train(
     resave_error_std = 0.001
     
     # Compute target tokens ones
-    target_tokens = processor.tokenizer(target_text+"<|end|>\n", return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-    shift = len(processor.tokenizer.encode("<|end|>\n")) - 1 # first token is extra
+    
+    inputs_processor = AdvInputs(
+        questions=questions, 
+        test_questions=not_safe_questions_test, 
+        batch_size=batch_size, 
+        original_image=original_image, 
+        processor=processor, 
+        device=device, 
+        target_text=target_text)
 
-    # Training loop without outer loop over questions
     for iteration in tqdm(range(num_iterations)):
-        # Sample batch of questions
-        batch_questions = random.choices(questions, k=batch_size)
-        # prompts = ["USER: <image>\n" + q + "ASSISTANT: " + target_text for q in batch_questions]
-
-        prompts = [f'<|user|>\n<|image_1|>\n{q}<|end|>\n<|assistant|>\n{target_text}<|end|>\n' for q in batch_questions]
-
-        # Preprocess batch
-        inputs = batch_processing(processor, prompts, [original_image]*batch_size).to(device)
+        inputs = inputs_processor.get_inputs_train()
+        #inputs = processor(text=prompts, images=[original_image for _ in batch_questions], return_tensors="pt", padding=True).to(device)
         
         # Update mask for random square
         if mask_type == 'random_square':
@@ -239,13 +239,7 @@ def train(
         outputs = model(**inputs)
         logits = outputs.logits[:, :-1, :]
 
-        # Extract relevant logits and compute loss
-        suffix_length = target_tokens.shape[1] + 3
-        target = inputs["input_ids"][:, -suffix_length:-shift]# .repeat(batch_size, 1).to(device)
-
-        logits_suffix = logits[:, -suffix_length:-shift, :]
-        logits_suffix = logits_suffix.permute(0, 2, 1)
-        loss = F.cross_entropy(logits_suffix, target)
+        loss = inputs_processor.get_loss(logits)
         img_loss = image_fit_loss(x_0, x, 0, 1)
         loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
         accumulated_loss += loss.item()
@@ -296,11 +290,7 @@ def train(
             inputs['pixel_values'] = adv_processor.process(x_mod_resaved)['pixel_values'].repeat(repeat_size).to(device)
             outputs = model(**inputs)
             logits = outputs.logits[:, 0:-1, :]
-            
-            logits_suffix = logits[:, -suffix_length:-shift, :]
-            logits_suffix = logits_suffix.permute(0, 2, 1)
-            # target = target_tokens.repeat(logits_suffix.size(0), 1).to(logits_suffix.device)
-            resaved_loss = F.cross_entropy(logits_suffix, target)
+            resaved_loss = inputs_processor.get_loss(logits)
 
         # Log metrics
         wandb.log({
@@ -331,16 +321,13 @@ def train(
             # Save checkpoints
             x_mod = (x_0 + x).clone().detach()
             final_image = adv_processor.tensor2pil(x_mod)
-
             save_checkpoint(final_image, x + x_0, exp_path, global_iteration)
             
             img_path = os.path.join(exp_path, f"optimized_image_iter_{global_iteration}.png")
             img = Image.open(img_path).convert("RGB")
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
-            inference_prompts = [f'<|user|>\n<|image_1|>\n{batch_questions[0]}<|end|>\n<|assistant|>\n']
-            inputs_for_inference = batch_processing(processor, inference_prompts, [img]).to(device)
-            
+            inputs_for_inference = inputs_processor.get_inputs_inference(img)
             
             outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
             # Decode the generated output from the model
