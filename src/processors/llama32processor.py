@@ -115,14 +115,16 @@ class AdvMllamaInputs:
         
         return inputs
         
-    def get_inputs_inference(self, img):
+    def get_inputs_inference(self, img, question = None):
+        if question is None:
+            question = self.test_questions[0]
         inference_prompts = [self.processor.apply_chat_template([
                 {
                     "role": "user", 
                     "content": 
                         [
                             {"type": "image"}, 
-                            {"type": "text", "text": self.test_questions[0]}
+                            {"type": "text", "text": question}
                         ]
                 },
             ], add_generation_prompt=True)]
@@ -201,7 +203,7 @@ class DifferentiableMllamaImageProcessor():
     def resize_tensor(self, image: torch.Tensor) -> torch.Tensor:
         # C x H x W
         new_h, new_w, aspect_ratio = self._optimal_size(image)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate((image).unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image, aspect_ratio
     
@@ -293,11 +295,12 @@ class DifferentiableMllamaImageProcessor():
         """
         # C x H x W
         image, aspect_ratio = self.resize_tensor(image)
-        image = self.pad(image, aspect_ratio=aspect_ratio)
 
+        image = self.pad(image, aspect_ratio=aspect_ratio)
+        
         if self.do_rescale:
             image = self.rescale(image=image)
-        
+
         if self.do_normalize:
             image = self.normalize(image=image)
 

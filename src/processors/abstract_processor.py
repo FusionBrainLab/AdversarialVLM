@@ -134,7 +134,7 @@ class DifferentiableAbstractImageProcessor():
         """
         # C x H x W
         new_h, new_w = self._optimal_size(image)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image
 
