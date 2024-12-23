@@ -11,6 +11,7 @@ import wandb  # Import WandB
 import random  # Added import for random sampling
 
 from processors import load_components
+from train_test import run_model_test
 
 def setup_device(i=0):
     """Setup computing device."""
@@ -30,11 +31,11 @@ def save_checkpoint(image: Image.Image, tensor: torch.Tensor, path: str, iterati
 def initialize_wandb(exp_name, config):
     """Initialize WandB for experiment tracking."""
     wandb.init(
-        project="image_attack_optimization",  # Replace with your project name
+        project="image_attack_optimization",
         name=exp_name,
         config=config,  # Logging configuration
         tags=["image-attack", "training", "transformers"],
-        mode="online"  # Change to "offline" if you want to run without internet
+        mode="online"
     )
 
 def log_metrics_wandb(
@@ -42,7 +43,7 @@ def log_metrics_wandb(
         loss: torch.Tensor,
         final_image: np.array,
         final_tensor: torch.Tensor,
-        generated_table: str,
+        generated_table: wandb.Table,
         save_steps: int
     ):
     """Logs metrics and images to WandB."""
@@ -180,7 +181,7 @@ def train(
         adv_processors.append(adv_processor)
         inputs_processors.append(inputs_processor)
     
-    device_last = setup_device(7)
+    device_last = setup_device(3)
 
     x_0 = pil_to_tensor(original_image, resize=False, do_convert_rgb=adv_processors[0].do_convert_rgb).to(device_last)
     # print("New tensor size: ", x_0.shape)
@@ -230,8 +231,10 @@ def train(
     })
 
     min_losses = []
-    generated_table_list = []
 
+    # Создаём таблицу для логгирования выводов моделей
+    model_outputs_table = wandb.Table(columns=["iteration"] + model_names)
+    
     # Gradient accumulation variables
     global_iteration = 0
     accumulated_loss = 0
@@ -247,11 +250,11 @@ def train(
             raise NotImplementedError
         # Prepare image input for training
         if clamp_method == 'tanh':
-            x = 0.1 * torch.tanh(p)
+            x = 0.5 * torch.tanh(p)
         
         inputss = []
         pgrads = []
-        losses = [0]*7
+        losses = []
         for i, inputs_processor in enumerate(inputs_processors):
             inputs = inputs_processor.get_inputs_train()
             inputss.append(inputs)
@@ -269,7 +272,7 @@ def train(
             logits = outputs.logits[:, :-1, :]
             
             loss = inputs_processor.get_loss(logits)
-            losses[i] = loss.item()
+            losses.append(loss.item())
             accumulated_loss += loss.item()
             if i < len(devices) - 1:
                 loss.backward(retain_graph=True)    
@@ -332,22 +335,19 @@ def train(
             resaved_losses = []
             for i, inputs in enumerate(inputss):
                 pixel_values = adv_processors[i].process(x_mod_resaved.to(devices[i]))['pixel_values']
+                repeat_size = len(pixel_values.shape)*[1]
+                repeat_size[0] = batch_size
                 inputs['pixel_values'] = pixel_values.repeat(repeat_size)
                 outputs = models[i](**inputs)
                 logits = outputs.logits[:, 0:-1, :]
                 resaved_losses.append(inputs_processors[i].get_loss(logits))
             
             resaved_loss = torch.tensor([loss.item() for loss in resaved_losses]).mean()
-
-        # Log metrics
-        wandb.log({
-            "loss0": losses[0],
-            "loss1": losses[1],
-            "loss2": losses[2], 
-            "loss3": losses[3], 
-            #"image_loss": img_loss.item(),
+        
+        # Log metrics dynamically based on the number of models
+        wandb_log_data = {
             "loss_resaved": resaved_loss.item(),
-            "iteration": iteration, 
+            "iteration": iteration,
             "adversarial_mean": x.mean(),
             "adversarial_std": x.std(),
             "lr": scheduler.get_last_lr()[0],
@@ -358,11 +358,16 @@ def train(
             "noise_std": noise.std(),
             "loss": loss.item(),
             "global_iteration": global_iteration,
-            "adversarial_mean": x.mean(),
-            "adversarial_std": x.std(),
-            "lr": scheduler.get_last_lr()[0],
             "grad norm": grad_norm
-        })
+        }
+
+        # Add losses for each model dynamically
+        for i, model_loss in enumerate(losses):
+            mn = model_names[i].replace("/", "_")
+            wandb_log_data[f"loss_{i}_{mn}"] = model_loss
+
+        # Log all collected data to WandB
+        wandb.log(wandb_log_data)
 
         # Every `save_steps`, run inference and log results
         if iteration % save_steps == 0 or iteration == num_iterations - 1:
@@ -377,16 +382,32 @@ def train(
             img = Image.open(img_path).convert("RGB")
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
-            inputs_for_inference = inputs_processor.get_inputs_inference(img)
+            iteration_outputs = [iteration]  # Первая колонка — номер итерации
+    
+            models_output, wandb_log = run_model_test(
+                models=models,
+                processors=processors,
+                inputs_processors=inputs_processors,
+                model_names=model_names,
+                not_safe_questions_test=not_safe_questions_test,
+                target_text=target_text,
+                exp_path=exp_path,
+                iteration=iteration,
+                img=img
+            )
             
-            outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
-            # Decode the generated output from the model
-            generated_text = processor.tokenizer.decode(outputs_inference[outputs_inference != -1], skip_special_tokens=False)
-            print("generated_text:", generated_text)
-            generated_table_list.append([generated_text])
-            generated_table = wandb.Table(data=generated_table_list, columns=["Generated Text"])
+            wandb.log(wandb_log)
+
+            # Добавляем строку в таблицу
+            iteration_outputs = iteration_outputs + models_output[1:]
             
-            log_metrics_wandb(iteration, loss, final_image, (x + x_0), generated_table, save_steps)
+            print("Question:", models_output[0])
+            for ans in models_output[1:]:
+                print(f"Model {model_names[i]} output:", ans)
+            
+            model_outputs_table.add_data(*iteration_outputs)
+            
+            log_metrics_wandb(iteration, loss, final_image, (x + x_0), model_outputs_table, save_steps)
 
         # Clip everything
         if restart_num > 0 and (iteration + 1) % restart_num == 0:

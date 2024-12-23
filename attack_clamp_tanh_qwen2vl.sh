@@ -18,13 +18,13 @@ echo $WANDB_KEY
 # wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="airi_tanh_Qwen2-VL-2B-Vision_start_added_unsafe_questions"
+EXP_NAME="gray_Qwen2-VL-2B"
 IMG_ORIG="airi.png"
 PROMPT="list"
 TARGET_TEXT="sure, here it is!"
 MODEL_NAME="Qwen/Qwen2-VL-2B-Instruct"
 LR=1e-2
-NUM_ITERATIONS=5000
+NUM_ITERATIONS=10000
 SAVE_STEPS=250
 BATCH_SIZE=1
 GRAD_ACCUM_STEPS=1
@@ -32,8 +32,8 @@ CLAMP_METHOD="tanh"  # Use tanh clamping method choices=['clamp', 'tanh', 'none'
 RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
 
 # Run the Python script with all arguments
-wandb online
-CUDA_VISIBLE_DEVICES=7 python "attack_list_o1upd_qwen2VL.py" \
+wandb offline
+CUDA_VISIBLE_DEVICES=5 python "src/attack_model.py" \
     --exp_name "$EXP_NAME" \
     --img_orig "$IMG_ORIG" \
     --prompt "$PROMPT" \

@@ -23,16 +23,16 @@ MODEL_MAP = {
         "input_class": "AdvMllamaInputs",
         "processor_class": "DifferentiableMllamaImageProcessor",
     },
-    "alpindale/Llama-3.2-90B-Vision-Instruct": {
-        "module": "processors.llama32processor",
-        "input_class": "AdvMllamaInputs",
-        "processor_class": "DifferentiableMllamaImageProcessor",
-    },
     "alpindale/Llama-3.2-11B-Vision": {
         "module": "processors.llama32processor",
         "input_class": "AdvMllamaInputs",
         "processor_class": "DifferentiableMllamaImageProcessor",
     },
+    "SinclairSchneider/Llama-Guard-3-11B-Vision": {
+        "module": "processors.llama32processor",
+        "input_class": "AdvMllamaInputs",
+        "processor_class": "DifferentiableMllamaImageProcessor",
+    }
     
 }
 

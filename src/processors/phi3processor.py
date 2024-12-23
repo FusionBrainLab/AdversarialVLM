@@ -23,8 +23,15 @@ def pad_to_max_num_crops_tensor(images, max_crops=5):
 
 def load_model_and_processor(model_name, device):
     """Load the model and processor."""
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).half().to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        trust_remote_code=True, 
+        attn_implementation="flash_attention_2", 
+        torch_dtype=torch.float16
+    ).to(device)
+    
     processor = AutoProcessor.from_pretrained(model_name, num_crops=6, padding_side='left', trust_remote_code=True)
+    model.generation_config.eos_token_id = 32000
     return model, processor
 
 
@@ -74,7 +81,7 @@ class AdvPhiInputs:
         return inputs
         
     def get_inputs_inference(self, img, question = None):
-        if question is not None:
+        if question is None:
             question = self.test_questions[0]
 
         inference_prompts = [f'<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n']
@@ -111,7 +118,7 @@ class DifferentiablePhi3VImageProcessor():
     
     def fit_size_tensor(self, image: torch.Tensor) -> torch.Tensor:
         new_h, new_w = self._optimal_size(image, self.num_crops)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image
     

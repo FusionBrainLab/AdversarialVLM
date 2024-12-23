@@ -11,7 +11,7 @@ import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
 
-from src.llama32processor import DifferentiableMllamaImageProcessor, AdvMllamaInputs
+from processors.llama32processor import DifferentiableMllamaImageProcessor, AdvMllamaInputs
 
 
 def load_model_and_processor(model_name, device):
@@ -127,7 +127,8 @@ def train(
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
-    questions = not_safe_questions + questions 
+    questions = not_safe_questions
+    print("Questions:", questions)
     if prompt != "list":
         questions = [prompt]
 
@@ -297,11 +298,13 @@ def train(
             inputs['pixel_values'] = adv_processor.process(x_mod_resaved)['pixel_values'].repeat(repeat_size).to(device)
             outputs = model(**inputs)
             logits = outputs.logits[:, 0:-1, :]
-            # logits_suffix = logits[:, -suffix_length:-shift, :]
-            # logits_suffix = logits_suffix.permute(0, 2, 1)
-            # target = target_tokens.repeat(logits_suffix.size(0), 1).to(logits_suffix.device)
+            
+            # logits_suffix = logits[:, -inputs_processor.suffix_length:-inputs_processor.shift, :]
+            # suffix_ids = processor.tokenizer.decode(logits_suffix.argmax(axis=-1)[0])
+            # print("Target:", inputs_processor.target)
+            # print("Model output:", suffix_ids)
+            
             resaved_loss = inputs_processor.get_loss(logits)
-            # F.cross_entropy(logits_suffix, target)
 
         # Log metrics
         wandb.log({

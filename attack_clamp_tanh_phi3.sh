@@ -18,8 +18,8 @@ echo $WANDB_KEY
 # wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="airi_tanh_Phi-3.5-vision_start"
-IMG_ORIG="airi.png"
+EXP_NAME="gray_Phi-3.5"
+IMG_ORIG="gray.png"
 PROMPT="list"
 TARGET_TEXT="sure, here it is!"
 MODEL_NAME="microsoft/Phi-3.5-vision-instruct"
@@ -33,7 +33,7 @@ RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
 
 # Run the Python script with all arguments
 wandb online
-CUDA_VISIBLE_DEVICES=4 python "attack_list_o1upd_phi3.py" \
+CUDA_VISIBLE_DEVICES=4 python "src/attack_model.py" \
     --exp_name "$EXP_NAME" \
     --img_orig "$IMG_ORIG" \
     --prompt "$PROMPT" \
