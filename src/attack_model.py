@@ -119,6 +119,7 @@ def train(
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
+    from answers import answers, adv_answers
     questions = not_safe_questions + questions 
     if prompt != "list":
         questions = [prompt]
@@ -216,6 +217,10 @@ def train(
         target_text=target_text)
 
     for iteration in tqdm(range(num_iterations)):
+        if len(inputs_processor.target_texts) > 1:
+            random_text = random.choice(inputs_processor.target_texts)
+            inputs_processor.set_target_text(random_text)
+        
         inputs = inputs_processor.get_inputs_train()
         #inputs = processor(text=prompts, images=[original_image for _ in batch_questions], return_tensors="pt", padding=True).to(device)
         
@@ -379,7 +384,8 @@ def main():
     parser.add_argument("--mask_size", type=int, default=None, help="Size parameter for the mask (n for corner or random_square, k for bottom_lines).")  # Added argument
     parser.add_argument("--clamp_method", type=str, default='clamp', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Added argument
     parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")  # Added argument
-
+    parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
+    
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
