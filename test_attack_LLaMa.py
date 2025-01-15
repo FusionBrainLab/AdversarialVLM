@@ -5,10 +5,9 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from attack_list_o1upd_llamaV import setup_device
-from src.llama32processor import load_model_and_processor# , DifferentiableMllamaImageProcessor,
+from src.processors.llama32processor import load_model_and_processor# , DifferentiableMllamaImageProcessor,
 
-from questions import not_safe_questions_test, questions
+from src.questions import not_safe_questions_test, questions
 
 model, processor = load_model_and_processor("alpindale/Llama-3.2-11B-Vision-Instruct", torch.device("cuda:7"))
 
