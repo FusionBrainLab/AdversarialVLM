@@ -1,0 +1,11 @@
+images
+1000_images
+runs
+good_runs
+wandb
+*.ipynb_checkpoints*
+*__pycache__
+
+*dev*
+testing*
+*csv

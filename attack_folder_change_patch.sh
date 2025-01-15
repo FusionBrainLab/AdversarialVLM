@@ -10,32 +10,31 @@ if [ ! -f "$WANDB_KEY_FILE" ]; then
 fi
 
 # Read the WandB API key from the file
-export WANDB_API_KEY=$(cat <"$WANDB_KEY_FILE")
 WANDB_KEY=$(<"$WANDB_KEY_FILE")
-echo $WANDB_KEY
 
 # Log in to WandB using the API key
-# wandb login "$WANDB_KEY"
+wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="gray_Llama3.2-3-11B-Vision-guard_sure_full"
-IMG_ORIG="gray.png"
+EXP_NAME="masked_folder_attack"
+IMG_FOLDER="1000_images"
 PROMPT="list"
 TARGET_TEXT="sure, here it is!"
-MODEL_NAME="SinclairSchneider/Llama-Guard-3-11B-Vision"
+MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 LR=1e-2
-NUM_ITERATIONS=10000
-SAVE_STEPS=250
-BATCH_SIZE=2
+NUM_ITERATIONS=50000
+SAVE_STEPS=500
+BATCH_SIZE=4
 GRAD_ACCUM_STEPS=1
 CLAMP_METHOD="tanh"  # Use tanh clamping method choices=['clamp', 'tanh', 'none']
-RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
+MASK_TYPE="bottom_lines"  # Train only on the corner of the image ['corner', 'bottom_lines', 'random_square']
+MASK_SIZE=10        # Size of the corner to train on
 
 # Run the Python script with all arguments
 wandb online
-CUDA_VISIBLE_DEVICES=2 python "src/attack_list_o1upd_llamaV_guard.py" \
+CUDA_VISIBLE_DEVICES=6 python attack_list_folder.py \
     --exp_name "$EXP_NAME" \
-    --img_orig "$IMG_ORIG" \
+    --img_folder "$IMG_FOLDER" \
     --prompt "$PROMPT" \
     --target_text "$TARGET_TEXT" \
     --model_name "$MODEL_NAME" \
@@ -47,5 +46,5 @@ CUDA_VISIBLE_DEVICES=2 python "src/attack_list_o1upd_llamaV_guard.py" \
     --scheduler_step_size 100 \
     --scheduler_gamma 1.0 \
     --clamp_method "$CLAMP_METHOD" \
-    --restart_num "$RESTART_NUM"
-wait
+    --mask_type "$MASK_TYPE" \
+    --mask_size "$MASK_SIZE"

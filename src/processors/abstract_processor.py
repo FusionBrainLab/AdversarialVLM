@@ -1,3 +1,4 @@
+import random
 from typing import List, Tuple, Union
 import PIL
 import torch
@@ -7,6 +8,85 @@ from transformers.image_processing_utils import BatchFeature
 import torch.nn.functional as F
 from torchvision.transforms import functional as F_tv
 from PIL import Image
+
+
+class AdvMllamaInputs:
+    def __init__(self, questions, test_questions, batch_size, original_image, processor, device="cuda:0", target_text="sure, here it is!"):
+        self.questions = questions
+        self.test_questions = test_questions
+        self.batch_size = batch_size
+        self.processor = processor
+        self.target_text = target_text
+        self.original_image = original_image
+        self.device = device
+        
+        extra_token = None ## Your extra token, ex "<|eot_id|>"
+        self.target_tokens = processor.tokenizer(target_text+extra_token, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+        self.shift = len(processor.tokenizer.encode(extra_token)) # first token is extra
+        self.suffix_length = self.target_tokens.shape[1]
+        
+        self.target = self.target_tokens[:, :-self.shift].repeat(batch_size, 1).to(self.device)
+    
+    def get_loss(self, logits):
+        # Extract relevant logits and compute loss
+        logits_suffix = logits[:, -self.suffix_length:-self.shift, :]
+        logits_suffix = logits_suffix.permute(0, 2, 1)
+        loss = F.cross_entropy(logits_suffix, self.target)
+        return loss
+
+    def get_inputs_train(self):
+        batch_questions = random.choices(self.questions, k=self.batch_size)
+        
+        prompts = [self.processor.apply_chat_template([
+            {
+                "role": "user", 
+                "content": 
+                    [
+                        {"type": "image"}, 
+                        {"type": "text", "text": q}
+                    ]
+            },
+            {
+                "role": "assistant",
+                "content": 
+                    [
+                        {"type": "text", "text": self.target_text}
+                    ]
+            }
+        ]) for q in batch_questions]
+        
+        inputs = self.processor(
+            text=prompts,
+            images=[self.original_image for _ in batch_questions],
+            padding=True,
+            return_tensors="pt",
+        ).to(torch.device(self.device))
+        
+        return inputs
+        
+    def get_inputs_inference(self, img, question = None):
+        if question is not None:
+            question = self.test_questions[0]
+        inference_prompts = [self.processor.apply_chat_template([
+                {
+                    "role": "user", 
+                    "content": 
+                        [
+                            {"type": "image"}, 
+                            {"type": "text", "text": question}
+                        ]
+                },
+            ], add_generation_prompt=True)]
+            
+        inputs_for_inference = self.processor(
+                text=inference_prompts, 
+                images=[img], 
+                return_tensors="pt", 
+                padding=True
+            ).to(self.device)
+        
+        return inputs_for_inference
+
 
 class DifferentiableAbstractImageProcessor():
     def __init__(self, orig_processor, device):
@@ -54,7 +134,7 @@ class DifferentiableAbstractImageProcessor():
         """
         # C x H x W
         new_h, new_w = self._optimal_size(image)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image
 

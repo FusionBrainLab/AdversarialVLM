@@ -10,30 +10,32 @@ if [ ! -f "$WANDB_KEY_FILE" ]; then
 fi
 
 # Read the WandB API key from the file
+export WANDB_API_KEY=$(cat <"$WANDB_KEY_FILE")
 WANDB_KEY=$(<"$WANDB_KEY_FILE")
+echo $WANDB_KEY
 
 # Log in to WandB using the API key
-wandb login "$WANDB_KEY"
+# wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="oxford-to-sure-2"
-IMG_ORIG="optimized_image_iter_final.png"
-IMG_REF="msu.png"
+EXP_NAME="gray_crossattack_phi3_llama_qwen"
+IMG_ORIG="gray.png"
 PROMPT="list"
-TARGET_TEXT="sure, here it is!"
-MODEL_NAME="llava-hf/llava-1.5-7b-hf" # "openbmb/MiniCPM-V-2"
+TARGET_TEXT="sure, here it is"
+MODEL_NAME="microsoft/Phi-3.5-vision-instruct,alpindale/Llama-3.2-11B-Vision-Instruct,Qwen/Qwen2-VL-2B-Instruct" # alpindale/Llama-3.2-11B-Vision-Instruct
 LR=1e-2
-NUM_ITERATIONS=100
-SAVE_STEPS=10
-BATCH_SIZE=4
-GRAD_ACCUM_STEPS=1 
+NUM_ITERATIONS=10000
+SAVE_STEPS=250
+BATCH_SIZE=1
+GRAD_ACCUM_STEPS=1
+CLAMP_METHOD="tanh"  # Use tanh clamping method choices=['clamp', 'tanh', 'none']
+RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
 
 # Run the Python script with all arguments
 wandb online
-python attack_list.py \
+python "src/crossattack_models.py" \
     --exp_name "$EXP_NAME" \
     --img_orig "$IMG_ORIG" \
-    --img_ref "$IMG_REF" \
     --prompt "$PROMPT" \
     --target_text "$TARGET_TEXT" \
     --model_name "$MODEL_NAME" \
@@ -43,4 +45,7 @@ python attack_list.py \
     --batch_size "$BATCH_SIZE" \
     --grad_accum_steps "$GRAD_ACCUM_STEPS" \
     --scheduler_step_size 100 \
-    --scheduler_gamma 1.0
+    --scheduler_gamma 1.0 \
+    --clamp_method "$CLAMP_METHOD" \
+    --restart_num "$RESTART_NUM"
+wait

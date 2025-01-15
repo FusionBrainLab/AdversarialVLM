@@ -77,14 +77,16 @@ class AdvQwen2VLInputs:
         
         return inputs
         
-    def get_inputs_inference(self, img):
+    def get_inputs_inference(self, img, question = None):
+        if question is None:
+            question = self.test_questions[0]
         inference_prompts = [self.processor.apply_chat_template([
                 {
                     "role": "user", 
                     "content": 
                         [
                             {"type": "image"}, 
-                            {"type": "text", "text": self.test_questions[0]}
+                            {"type": "text", "text": question}
                         ]
                 },
             ], add_generation_prompt=True)]
@@ -104,10 +106,12 @@ class DifferentiableQwen2VLImageProcessor():
         orig_processor : 
         
         """
-        self.image_mean = torch.tensor(orig_processor.image_mean).view(-1, 1, 1).to(device)
-        self.image_std = torch.tensor(orig_processor.image_std).view(-1, 1, 1).to(device)
         self.orig_processor = orig_processor
         self.device = device
+        
+        self.image_mean = torch.tensor(orig_processor.image_mean).view(-1, 1, 1).to(device)
+        self.image_std = torch.tensor(orig_processor.image_std).view(-1, 1, 1).to(device)
+
         self.do_convert_rgb = orig_processor.do_convert_rgb
         self.patch_size = orig_processor.patch_size
         self.merge_size = orig_processor.merge_size
@@ -115,7 +119,7 @@ class DifferentiableQwen2VLImageProcessor():
         self.max_pixels = orig_processor.max_pixels
         self.temporal_patch_size = orig_processor.temporal_patch_size
 
-    def pil_to_tensor(self, image: PIL.Image, resize: bool = True) -> torch.Tensor:
+    def pil_to_tensor(self, image: PIL.Image, resize: bool = False) -> torch.Tensor:
         """
         Convert a PIL image to a tensor.
 
@@ -145,7 +149,7 @@ class DifferentiableQwen2VLImageProcessor():
             Resized tensor image, shape (3, new_H, new_W)
         """
         new_h, new_w = self._optimal_size(image)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image
 

@@ -5,12 +5,20 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import MllamaForConditionalGeneration
 import os
 import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
 
-from src.qwen2VLprocessor import DifferentiableQwen2VLImageProcessor, load_model_and_processor, AdvQwen2VLInputs
+from processors.llama32processor import DifferentiableMllamaImageProcessor, AdvMllamaInputs
+
+
+def load_model_and_processor(model_name, device):
+    """Load the model and processor."""
+    model = MllamaForConditionalGeneration.from_pretrained("SinclairSchneider/Llama-Guard-3-11B-Vision").half().to(device)
+    processor = AutoProcessor.from_pretrained("alpindale/Llama-3.2-11B-Vision-Instruct", padding_side='left')
+    return model, processor
 
 def setup_device():
     """Setup computing device."""
@@ -119,7 +127,8 @@ def train(
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
-    questions = not_safe_questions + questions 
+    questions = not_safe_questions
+    print("Questions:", questions)
     if prompt != "list":
         questions = [prompt]
 
@@ -129,12 +138,17 @@ def train(
 
     # Load model and processor
     model, processor = load_model_and_processor(model_name, device)
-    adv_processor = DifferentiableQwen2VLImageProcessor(processor.image_processor, device)
+    adv_processor = DifferentiableMllamaImageProcessor(processor.image_processor, device)
 
     # Preprocess images and prepare tensors
-    original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    if os.path.exists(img_orig):
+        original_image = Image.open(img_orig).convert("RGB")
+    elif os.path.exists(os.path.join("./images", img_orig)):
+        original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    else:
+        raise FileNotFoundError(f"Cannot find {img_orig}")
     print("Original image size: ", original_image.size)
-    x_0 = adv_processor.pil_to_tensor(original_image).to(device)
+    x_0 = adv_processor.pil_to_tensor(original_image, resize=False).to(device)
     print("New tensor size: ", x_0.shape)
     
     # white = Image.fromarray(np.ones(original_image.size, dtype=np.uint8) * 255)
@@ -200,7 +214,7 @@ def train(
     
     # Compute target tokens ones
     
-    inputs_processor = AdvQwen2VLInputs(
+    inputs_processor = AdvMllamaInputs(
         questions=questions, 
         test_questions=not_safe_questions_test, 
         batch_size=batch_size, 
@@ -209,9 +223,7 @@ def train(
         device=device, 
         target_text=target_text)
 
-    # Training loop without outer loop over questions
     for iteration in tqdm(range(num_iterations)):
-        # Sample batch of questions
         inputs = inputs_processor.get_inputs_train()
         #inputs = processor(text=prompts, images=[original_image for _ in batch_questions], return_tensors="pt", padding=True).to(device)
         
@@ -236,7 +248,7 @@ def train(
         logits = outputs.logits[:, :-1, :]
 
         loss = inputs_processor.get_loss(logits)
-        img_loss = image_fit_loss(x_0, x, 0, 1)
+        img_loss = image_fit_loss(x_0, x, 0, 1, 1)
         loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
         accumulated_loss += loss.item()
         loss.backward()
@@ -286,11 +298,13 @@ def train(
             inputs['pixel_values'] = adv_processor.process(x_mod_resaved)['pixel_values'].repeat(repeat_size).to(device)
             outputs = model(**inputs)
             logits = outputs.logits[:, 0:-1, :]
-            # logits_suffix = logits[:, -suffix_length:-shift, :]
-            # logits_suffix = logits_suffix.permute(0, 2, 1)
-            # target = target_tokens.repeat(logits_suffix.size(0), 1).to(logits_suffix.device)
+            
+            # logits_suffix = logits[:, -inputs_processor.suffix_length:-inputs_processor.shift, :]
+            # suffix_ids = processor.tokenizer.decode(logits_suffix.argmax(axis=-1)[0])
+            # print("Target:", inputs_processor.target)
+            # print("Model output:", suffix_ids)
+            
             resaved_loss = inputs_processor.get_loss(logits)
-            # F.cross_entropy(logits_suffix, target)
 
         # Log metrics
         wandb.log({
@@ -328,7 +342,6 @@ def train(
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
             inputs_for_inference = inputs_processor.get_inputs_inference(img)
-            
             
             outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
             # Decode the generated output from the model

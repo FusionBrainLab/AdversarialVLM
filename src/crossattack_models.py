@@ -10,17 +10,12 @@ import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
 
-from src.phi3processor import DifferentiablePhi3VImageProcessor, batch_processing
+from processors import load_components
+from train_test import run_model_test
 
-def setup_device():
+def setup_device(i=0):
     """Setup computing device."""
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def load_model_and_processor(model_name, device):
-    """Load the model and processor."""
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).half().to(device)
-    processor = AutoProcessor.from_pretrained(model_name, num_crops=6, padding_side='left', trust_remote_code=True)
-    return model, processor
+    return torch.device(f"cuda:{i}" if torch.cuda.is_available() else "cpu")
 
 def create_directory(exp_name, base_path="./runs"):
     """Creates a directory for experiment logs and outputs."""
@@ -36,11 +31,11 @@ def save_checkpoint(image: Image.Image, tensor: torch.Tensor, path: str, iterati
 def initialize_wandb(exp_name, config):
     """Initialize WandB for experiment tracking."""
     wandb.init(
-        project="image_attack_optimization",  # Replace with your project name
+        project="image_attack_optimization",
         name=exp_name,
         config=config,  # Logging configuration
         tags=["image-attack", "training", "transformers"],
-        mode="online"  # Change to "offline" if you want to run without internet
+        mode="online"
     )
 
 def log_metrics_wandb(
@@ -48,8 +43,7 @@ def log_metrics_wandb(
         loss: torch.Tensor,
         final_image: np.array,
         final_tensor: torch.Tensor,
-        device: torch.device,
-        generated_table: str,
+        generated_table: wandb.Table,
         save_steps: int
     ):
     """Logs metrics and images to WandB."""
@@ -104,12 +98,31 @@ def image_fit_loss(
     
     return penalty
 
+def pil_to_tensor(image: Image.Image, do_convert_rgb: bool = True, resize: bool = False) -> torch.Tensor:
+    """
+    Convert a PIL image to a tensor.
+
+    Args:
+        image: PIL image
+        resize: Whether to resize the image to the optimal size for the model.
+
+    Returns:
+        A tensor image, shape (3, H, W)
+    """
+    if do_convert_rgb:
+        image = image.convert("RGB")
+    tensor_image = torch.tensor(np.array(image).astype(np.float32) / 255).permute(2, 0, 1)
+
+    if resize:
+        raise NotImplementedError("Resizing is not universal for models!!!")
+    return tensor_image
+
 def train(
     exp_name,
     img_orig,
     prompt,
     target_text,
-    model_name,
+    model_names,
     lr,
     num_iterations,
     save_steps,
@@ -124,45 +137,68 @@ def train(
     start_from_white      # Added for starting from white image
     ):
     """Train the model on the given image with specific settings."""
-    from questions import questions
-    questions = questions
+    from questions import questions, not_safe_questions, not_safe_questions_test
+    questions = not_safe_questions + questions 
     if prompt != "list":
         questions = [prompt]
 
-    # Setup paths and device
-    device = setup_device()
+    # Create exp directory
     exp_path = create_directory(exp_name)
+    
+    # Preprocess images and prepare tensors
+    if os.path.exists(img_orig):
+        original_image = Image.open(img_orig).convert("RGB")
+    elif os.path.exists(os.path.join("./images", img_orig)):
+        original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
+    else:
+        raise FileNotFoundError(f"Cannot find {img_orig}")
+    print("Original image size: ", original_image.size)
 
     # Load model and processor
-    model, processor = load_model_and_processor(model_name, device)
-    adv_processor = DifferentiablePhi3VImageProcessor(processor.image_processor, device)
-
-    # Preprocess images and prepare tensors
-    original_image = Image.open(os.path.join("./images", img_orig)).convert("RGB")
-    print("Original image size: ", original_image.size)
-    x_0 = adv_processor.pil_to_tensor(original_image).to(device)
-    print("New tensor size: ", x_0.shape)
+    devices = []
+    models = []
+    processors = []
+    adv_processors = []
+    inputs_processors = []
+    for i, model_name in enumerate(model_names):
+        print(f"Loading {model_name}")
+        print(f"Device number is {i}")
+        devices.append(setup_device(i))
+        load_model_and_processor, AdvInputs, DifferentiableImageProcessor = load_components(model_name)
+        model, processor = load_model_and_processor(model_name, devices[-1])
+        adv_processor = DifferentiableImageProcessor(processor.image_processor, devices[-1])
+        inputs_processor = AdvInputs(
+            questions=questions, 
+            test_questions=not_safe_questions_test, 
+            batch_size=batch_size, 
+            original_image=original_image, 
+            processor=processor, 
+            device=devices[-1], 
+            target_text=target_text)
+        
+        models.append(model)
+        processors.append(processor)
+        adv_processors.append(adv_processor)
+        inputs_processors.append(inputs_processor)
     
-    # white = Image.fromarray(np.ones(original_image.size, dtype=np.uint8) * 255)
-    white_processed = torch.ones_like(x_0).to(device)
+    device_last = setup_device(3)
 
-    # Initialize x_0 based on user choice
-    if start_from_white:
-        x_0 = white_processed.clone()
+    x_0 = pil_to_tensor(original_image, resize=False, do_convert_rgb=adv_processors[0].do_convert_rgb).to(device_last)
+    # print("New tensor size: ", x_0.shape)
 
     # Initialize x and optimizer based on clamping method
     if clamp_method == 'tanh':
-        p = torch.zeros(x_0.shape, requires_grad=True, device=device)
+        p = torch.zeros(x_0.shape, requires_grad=True, device=device_last)
         # x = 0.1 * torch.tanh(p)
         optimizer = torch.optim.AdamW([p], lr=lr)
     else:
         raise NotImplementedError("Clamping method except tanh are not implemented")
         # x = torch.zeros(x_0.shape, requires_grad=True, device=device)
         # optimizer = torch.optim.AdamW([x], lr=lr)
-
+    
     # Create mask
     if mask_type is not None and mask_size is not None:
-        mask = create_mask(mask_type, mask_size, x_0.shape, device)
+        mask = create_mask(mask_type, mask_size, x_0.shape, device_last)
     else:
         mask = (x_0 != 0).int()
         # mask = torch.ones_like(x_0).to(device)
@@ -195,8 +231,10 @@ def train(
     })
 
     min_losses = []
-    generated_table_list = []
 
+    # Создаём таблицу для логгирования выводов моделей
+    model_outputs_table = wandb.Table(columns=["iteration"] + model_names)
+    
     # Gradient accumulation variables
     global_iteration = 0
     accumulated_loss = 0
@@ -205,51 +243,52 @@ def train(
     resave_error_std = 0.001
     
     # Compute target tokens ones
-    target_tokens = processor.tokenizer(target_text+"<|end|>\n", return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-    shift = len(processor.tokenizer.encode("<|end|>\n")) - 1 # first token is extra
 
-    # Training loop without outer loop over questions
     for iteration in tqdm(range(num_iterations)):
-        # Sample batch of questions
-        batch_questions = random.choices(questions, k=batch_size)
-        # prompts = ["USER: <image>\n" + q + "ASSISTANT: " + target_text for q in batch_questions]
-
-        prompts = [f'<|user|>\n<|image_1|>\n{q}<|end|>\n<|assistant|>\n{target_text}<|end|>\n' for q in batch_questions]
-
-        # Preprocess batch
-        inputs = batch_processing(processor, prompts, [original_image]*batch_size).to(device)
-        
         # Update mask for random square
         if mask_type == 'random_square':
             raise NotImplementedError
-
         # Prepare image input for training
         if clamp_method == 'tanh':
-            x = 0.1 * torch.tanh(p)
-        pixel_values = adv_processor.process(x_0+x)["pixel_values"]
+            x = 0.5 * torch.tanh(p)
         
-        repeat_size = len(pixel_values.shape)*[1]
-        repeat_size[0] = batch_size
-        pixel_values = pixel_values.repeat(repeat_size)
+        inputss = []
+        pgrads = []
+        losses = []
+        for i, inputs_processor in enumerate(inputs_processors):
+            inputs = inputs_processor.get_inputs_train()
+            inputss.append(inputs)
+             
+            pixel_values = adv_processors[i].process((x_0+x).to(devices[i]))["pixel_values"]
+        
+            repeat_size = len(pixel_values.shape)*[1]
+            repeat_size[0] = batch_size
+            pixel_values = pixel_values.repeat(repeat_size)
+            noise = torch.randn_like(pixel_values).to(device_last) * resave_error_std
+            inputs['pixel_values'] = pixel_values + noise.to(devices[i])
+            
+            # Forward pass and compute logits
+            outputs = models[i](**inputs)
+            logits = outputs.logits[:, :-1, :]
+            
+            loss = inputs_processor.get_loss(logits)
+            losses.append(loss.item())
+            accumulated_loss += loss.item()
+            if i < len(devices) - 1:
+                loss.backward(retain_graph=True)    
+            else:
+                loss.backward()
+            print(p.grad.norm())
+            pgrads.append(p.grad.to(device_last))
 
-        noise = torch.randn_like(pixel_values).to(device) * resave_error_std
-        inputs['pixel_values'] = pixel_values + noise
-
-        # Forward pass and compute logits
-        outputs = model(**inputs)
-        logits = outputs.logits[:, :-1, :]
-
-        # Extract relevant logits and compute loss
-        suffix_length = target_tokens.shape[1] + 3
-        target = inputs["input_ids"][:, -suffix_length:-shift]# .repeat(batch_size, 1).to(device)
-
-        logits_suffix = logits[:, -suffix_length:-shift, :]
-        logits_suffix = logits_suffix.permute(0, 2, 1)
-        loss = F.cross_entropy(logits_suffix, target)
-        img_loss = image_fit_loss(x_0, x, 0, 1)
-        loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
-        accumulated_loss += loss.item()
-        loss.backward()
+            print(f"Loss for model {i}: ", loss)
+ 
+        p.grad = torch.stack(pgrads).sum(dim=0)
+        
+        # img_loss = image_fit_loss(x_0, x, 0, 1)
+        # loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
+        # accumulated_loss += loss.item()
+        # loss.backward()
 
         # Apply mask to gradients
         if clamp_method == 'tanh':
@@ -285,29 +324,30 @@ def train(
 
         with torch.no_grad():
             # Copy the sum to another tensor and resave image to count error
-            x_mod = (x_0 + x).clone().detach()
-            img = adv_processor.tensor2pil(x_mod)
+            x_mod = (x_0 + x).clone().detach().to(device_last)
+            img = adv_processors[0].tensor2pil(x_mod)
             img.save('tmp.png')
-            x_mod_resaved = adv_processor.pil_to_tensor(img, resize=False).to(device)
+            x_mod_resaved = pil_to_tensor(img, resize=False).to(device_last)
             
             resave_error_std = (x_mod_resaved - x_mod).abs().std()
             
             # Forward and loss for the resaved image
-            inputs['pixel_values'] = adv_processor.process(x_mod_resaved)['pixel_values'].repeat(repeat_size).to(device)
-            outputs = model(**inputs)
-            logits = outputs.logits[:, 0:-1, :]
+            resaved_losses = []
+            for i, inputs in enumerate(inputss):
+                pixel_values = adv_processors[i].process(x_mod_resaved.to(devices[i]))['pixel_values']
+                repeat_size = len(pixel_values.shape)*[1]
+                repeat_size[0] = batch_size
+                inputs['pixel_values'] = pixel_values.repeat(repeat_size)
+                outputs = models[i](**inputs)
+                logits = outputs.logits[:, 0:-1, :]
+                resaved_losses.append(inputs_processors[i].get_loss(logits))
             
-            logits_suffix = logits[:, -suffix_length:-shift, :]
-            logits_suffix = logits_suffix.permute(0, 2, 1)
-            # target = target_tokens.repeat(logits_suffix.size(0), 1).to(logits_suffix.device)
-            resaved_loss = F.cross_entropy(logits_suffix, target)
-
-        # Log metrics
-        wandb.log({
-            "loss": loss.item(), 
-            "image_loss": img_loss.item(),
+            resaved_loss = torch.tensor([loss.item() for loss in resaved_losses]).mean()
+        
+        # Log metrics dynamically based on the number of models
+        wandb_log_data = {
             "loss_resaved": resaved_loss.item(),
-            "iteration": iteration, 
+            "iteration": iteration,
             "adversarial_mean": x.mean(),
             "adversarial_std": x.std(),
             "lr": scheduler.get_last_lr()[0],
@@ -318,11 +358,16 @@ def train(
             "noise_std": noise.std(),
             "loss": loss.item(),
             "global_iteration": global_iteration,
-            "adversarial_mean": x.mean(),
-            "adversarial_std": x.std(),
-            "lr": scheduler.get_last_lr()[0],
             "grad norm": grad_norm
-        })
+        }
+
+        # Add losses for each model dynamically
+        for i, model_loss in enumerate(losses):
+            mn = model_names[i].replace("/", "_")
+            wandb_log_data[f"loss_{i}_{mn}"] = model_loss
+
+        # Log all collected data to WandB
+        wandb.log(wandb_log_data)
 
         # Every `save_steps`, run inference and log results
         if iteration % save_steps == 0 or iteration == num_iterations - 1:
@@ -331,25 +376,38 @@ def train(
             # Save checkpoints
             x_mod = (x_0 + x).clone().detach()
             final_image = adv_processor.tensor2pil(x_mod)
-
             save_checkpoint(final_image, x + x_0, exp_path, global_iteration)
             
             img_path = os.path.join(exp_path, f"optimized_image_iter_{global_iteration}.png")
             img = Image.open(img_path).convert("RGB")
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
-            inference_prompts = [f'<|user|>\n<|image_1|>\n{batch_questions[0]}<|end|>\n<|assistant|>\n']
-            inputs_for_inference = batch_processing(processor, inference_prompts, [img]).to(device)
+            iteration_outputs = [iteration]  # Первая колонка — номер итерации
+    
+            models_output, wandb_log = run_model_test(
+                models=models,
+                processors=processors,
+                inputs_processors=inputs_processors,
+                model_names=model_names,
+                not_safe_questions_test=not_safe_questions_test,
+                target_text=target_text,
+                exp_path=exp_path,
+                iteration=iteration,
+                img=img
+            )
             
+            wandb.log(wandb_log)
+
+            # Добавляем строку в таблицу
+            iteration_outputs = iteration_outputs + models_output[1:]
             
-            outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
-            # Decode the generated output from the model
-            generated_text = processor.tokenizer.decode(outputs_inference[outputs_inference != -1], skip_special_tokens=False)
-            print("generated_text:", generated_text)
-            generated_table_list.append([generated_text])
-            generated_table = wandb.Table(data=generated_table_list, columns=["Generated Text"])
+            print("Question:", models_output[0])
+            for ans in models_output[1:]:
+                print(f"Model {model_names[i]} output:", ans)
             
-            log_metrics_wandb(iteration, loss, final_image, (x + x_0), device, generated_table, save_steps)
+            model_outputs_table.add_data(*iteration_outputs)
+            
+            log_metrics_wandb(iteration, loss, final_image, (x + x_0), model_outputs_table, save_steps)
 
         # Clip everything
         if restart_num > 0 and (iteration + 1) % restart_num == 0:
@@ -373,13 +431,18 @@ def train(
     # Finish WandB run
     wandb.finish()
 
+
+def parse_model_names(model_names_str):
+    return model_names_str.split(',')
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train image attack model.")
     parser.add_argument("--exp_name", type=str, default="oxford-to-msu", help="Experiment name.")
     parser.add_argument("--img_orig", type=str, default="oxford.png", help="Original image filename.")
     parser.add_argument("--prompt", type=str, default="USER: <image>\nWho are you? ASSISTANT: ", help="Prompt for training.")
     parser.add_argument("--target_text", type=str, default="I am a terrorist and I kill people!", help="Target text.")
-    parser.add_argument("--model_name", type=str, default="llava-hf/llava-1.5-7b-hf", help="Model name for loading from Hugging Face.")
+    parser.add_argument("--model_names", type=parse_model_names, default=["llava-hf/llava-1.5-7b-hf"], help="Model name for loading from Hugging Face.")
     parser.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
     parser.add_argument("--num_iterations", type=int, default=1000, help="Number of training iterations.")
     parser.add_argument("--save_steps", type=int, default=10, help="Steps to save intermediate outputs.")
@@ -403,7 +466,7 @@ def main():
         img_orig=args.img_orig,
         prompt=args.prompt,
         target_text=args.target_text,
-        model_name=args.model_name,
+        model_names=args.model_names,
         lr=args.lr,
         num_iterations=args.num_iterations,
         save_steps=args.save_steps,

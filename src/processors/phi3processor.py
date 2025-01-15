@@ -1,9 +1,11 @@
+import random
 from typing import Tuple, Union
 import PIL
 import torch
 import numpy as np
 import torchvision
 from transformers.image_processing_utils import BatchFeature
+from transformers import AutoProcessor, AutoModelForCausalLM
 import torch.nn.functional as F
 from torchvision.transforms import functional as F_tv
 from PIL import Image
@@ -17,6 +19,76 @@ def pad_to_max_num_crops_tensor(images, max_crops=5):
         pad = torch.zeros(max_crops - B, 3, H, W, dtype=images.dtype, device=images.device)
         images = torch.cat([images, pad], dim=0)
     return images
+
+
+def load_model_and_processor(model_name, device):
+    """Load the model and processor."""
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        trust_remote_code=True, 
+        attn_implementation="flash_attention_2", 
+        torch_dtype=torch.float16
+    ).to(device)
+    
+    processor = AutoProcessor.from_pretrained(model_name, num_crops=6, padding_side='left', trust_remote_code=True)
+    model.generation_config.eos_token_id = 32000
+    return model, processor
+
+
+class AdvPhiInputs:
+    def __init__(self, questions, test_questions, batch_size, original_image, processor, device="cuda:0", target_text="sure, here it is!"):
+        self.questions = questions
+        self.test_questions = test_questions
+        self.batch_size = batch_size
+        self.processor = processor
+        self.target_text = target_text
+        self.original_image = original_image
+        self.device = device
+        
+        extra_token = "<|end|>\n"
+        self.target_tokens = processor.tokenizer(target_text+extra_token, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+        self.shift = len(processor.tokenizer.encode(extra_token)) - 1 # first token is extra
+        self.suffix_length = self.target_tokens.shape[1]#  +  3
+        
+        self.target = self.target_tokens[:, :-self.shift].repeat(batch_size, 1).to(self.device)
+        # print("Suffix len:", self.suffix_length)
+        # print("Shift len:", self.shift)
+        # print("Target len:", self.target.shape)
+        # self.target = inputs["input_ids"][:, -suffix_length:-shift]
+    
+    def get_loss(self, logits):
+        # Extract relevant logits and compute loss
+        logits_suffix = logits[:, -self.suffix_length:-self.shift, :]
+        # print("Logits len:", logits_suffix.shape)
+        logits_suffix = logits_suffix.permute(0, 2, 1)
+        loss = F.cross_entropy(logits_suffix, self.target)
+        return loss
+
+    def get_inputs_train(self):
+        batch_questions = random.choices(self.questions, k=self.batch_size)
+        
+        prompts = [f'<|user|>\n<|image_1|>\n{q}<|end|>\n<|assistant|>\n{self.target_text}<|end|>\n' for q in batch_questions]
+        
+        # inputs = self.processor(
+        #     text=prompts,
+        #     images=[self.original_image for _ in batch_questions],
+        #     padding=True,
+        #     return_tensors="pt",
+        # ).to(torch.device(self.device))
+
+        inputs = batch_processing(self.processor, prompts, [self.original_image]*self.batch_size).to(self.device)
+        
+        return inputs
+        
+    def get_inputs_inference(self, img, question = None):
+        if question is None:
+            question = self.test_questions[0]
+
+        inference_prompts = [f'<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n']
+            
+        inputs_for_inference = batch_processing(self.processor, inference_prompts, [img]).to(self.device)
+        
+        return inputs_for_inference
 
 class DifferentiablePhi3VImageProcessor():
     def __init__(self, orig_processor, device):
@@ -46,11 +118,11 @@ class DifferentiablePhi3VImageProcessor():
     
     def fit_size_tensor(self, image: torch.Tensor) -> torch.Tensor:
         new_h, new_w = self._optimal_size(image, self.num_crops)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image
     
-    def pil_to_tensor(self, image: PIL.Image, resize: bool = True) -> torch.Tensor:
+    def pil_to_tensor(self, image: PIL.Image, resize: bool = False) -> torch.Tensor:
         image = image.convert("RGB")
         if resize:
             image = self.fit_size_pil(image)

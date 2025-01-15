@@ -3,6 +3,7 @@ import PIL
 import torch
 import numpy as np
 import torchvision
+import random
 from transformers.image_processing_utils import BatchFeature
 from transformers import AutoProcessor, MllamaForConditionalGeneration, MllamaConfig, MllamaImageProcessor
 from transformers.models.mllama.image_processing_mllama import get_optimal_tiled_canvas, get_image_size_fit_to_canvas, pack_images
@@ -61,25 +62,112 @@ def pad_to_max_num_crops_tensor(images, max_crops=5):
         images = torch.cat([images, pad], dim=0)
     return images
 
+class AdvMllamaInputs:
+    def __init__(self, questions, test_questions, batch_size, original_image, processor, device="cuda:0", target_text="sure, here it is!"):
+        self.questions = questions
+        self.test_questions = test_questions
+        self.batch_size = batch_size
+        self.processor = processor
+        self.target_text = target_text
+        self.original_image = original_image
+        self.device = device
+        
+        self.target_tokens = processor.tokenizer(target_text+"<|eot_id|>", return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+        self.shift = len(processor.tokenizer.encode("<|eot_id|>")) # first token is extra
+        self.suffix_length = self.target_tokens.shape[1]
+        
+        self.target = self.target_tokens[:, :-self.shift].repeat(batch_size, 1).to(self.device)
+    
+    def get_loss(self, logits):
+        # Extract relevant logits and compute loss
+        logits_suffix = logits[:, -self.suffix_length:-self.shift, :]
+        logits_suffix = logits_suffix.permute(0, 2, 1)
+        loss = F.cross_entropy(logits_suffix, self.target)
+        return loss
+
+    def get_inputs_train(self):
+        batch_questions = random.choices(self.questions, k=self.batch_size)
+        
+        prompts = [self.processor.apply_chat_template([
+            {
+                "role": "user", 
+                "content": 
+                    [
+                        {"type": "image"}, 
+                        {"type": "text", "text": q}
+                    ]
+            },
+            {
+                "role": "assistant",
+                "content": 
+                    [
+                        {"type": "text", "text": self.target_text}
+                    ]
+            }
+        ]) for q in batch_questions]
+        
+        inputs = self.processor(
+            text=prompts,
+            images=[self.original_image for _ in batch_questions],
+            padding=True,
+            return_tensors="pt",
+        ).to(torch.device(self.device))
+        
+        return inputs
+        
+    def get_inputs_inference(self, img, question = None):
+        if question is None:
+            question = self.test_questions[0]
+        inference_prompts = [self.processor.apply_chat_template([
+                {
+                    "role": "user", 
+                    "content": 
+                        [
+                            {"type": "image"}, 
+                            {"type": "text", "text": question}
+                        ]
+                },
+            ], add_generation_prompt=True)]
+            
+        inputs_for_inference = self.processor(
+                text=inference_prompts, 
+                images=[img], 
+                return_tensors="pt", 
+                padding=True
+            ).to(self.device)
+        
+        return inputs_for_inference
+
 class DifferentiableMllamaImageProcessor():
     def __init__(self, orig_processor, device):
         self.orig_processor = orig_processor
+        self.device = device
         
         self.image_mean = torch.tensor(orig_processor.image_mean).view(-1, 1, 1).to(device)
         self.image_std = torch.tensor(orig_processor.image_std).view(-1, 1, 1).to(device)
+
         self.do_convert_rgb = orig_processor.do_convert_rgb
-        self.do_rescale = orig_processor.do_rescale
+        self.do_rescale = False # not needed, tensors are already rescaled 
         self.do_normalize = orig_processor.do_normalize
         self.tile_size = orig_processor.size
         self.max_image_tiles = orig_processor.max_image_tiles
         self.rescale_factor = orig_processor.rescale_factor
-        self.device = device
-    
-    def pil_to_tensor(self, image: PIL.Image, resize: bool = True) -> torch.Tensor:
+
+    def pil_to_tensor(self, image: PIL.Image, resize: bool = False) -> torch.Tensor:
+        """
+        Convert a PIL image to a tensor.
+
+        Args:
+            image: PIL image
+            resize: Whether to resize the image to the optimal size for the model.
+
+        Returns:
+            A tensor image, shape (3, H, W)
+        """
         if self.do_convert_rgb:
             image = image.convert("RGB")
         tensor_image = torch.tensor(np.array(image).astype(np.float32) / 255).permute(2, 0, 1)
-        
+
         if resize:
             # num_channels, height, width = image.shape
             # tensor_image = tensor_image.reshape((1, num_channels, height, width))
@@ -115,7 +203,7 @@ class DifferentiableMllamaImageProcessor():
     def resize_tensor(self, image: torch.Tensor) -> torch.Tensor:
         # C x H x W
         new_h, new_w, aspect_ratio = self._optimal_size(image)
-        image = F.interpolate(image.unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False)
+        image = F.interpolate((image).unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image, aspect_ratio
     
@@ -167,6 +255,30 @@ class DifferentiableMllamaImageProcessor():
 
         return image
     
+    def pack_images(self, batch_images: List[List[torch.Tensor]]
+    ) -> Tuple[torch.Tensor, List[List[int]]]:
+        batch_size = len(batch_images)
+        max_num_images = max([len(images) for images in batch_images])
+        shapes = [image.shape for images in batch_images for image in images]
+        _, channels, tile_height, tile_width = shapes[0]
+
+        # Initialize the stacked images array with zeros
+        stacked_images = torch.zeros(
+            (batch_size, max_num_images, self.max_image_tiles, channels, tile_height, tile_width)
+        ).to(self.device)
+
+        # Fill the stacked images array with the tiled images from the batch
+        all_num_tiles = []
+        for i, images in enumerate(batch_images):
+            num_sample_tiles = []
+            for j, image in enumerate(images):
+                num_tiles = image.shape[0]
+                stacked_images[i, j, :num_tiles] = image
+                num_sample_tiles.append(num_tiles)
+            all_num_tiles.append(num_sample_tiles)
+
+        return stacked_images, all_num_tiles
+    
     def process(self, image: torch.Tensor) -> dict:
         """
         Process the input image into a format compatible with the LLaMA model.
@@ -183,11 +295,12 @@ class DifferentiableMllamaImageProcessor():
         """
         # C x H x W
         image, aspect_ratio = self.resize_tensor(image)
-        image = self.pad(image, aspect_ratio=aspect_ratio)
 
+        image = self.pad(image, aspect_ratio=aspect_ratio)
+        
         if self.do_rescale:
             image = self.rescale(image=image)
-        
+
         if self.do_normalize:
             image = self.normalize(image=image)
 
@@ -197,6 +310,9 @@ class DifferentiableMllamaImageProcessor():
         
         image_tiles, channels, tile_height, tile_width = image.shape
         image = image.reshape(1, 1, image_tiles, channels, tile_height, tile_width)
+        
+        image, _ = self.pack_images(image)
+        
         # print(image.shape)
         
         # images: batch_size, max_num_images, max_image_tiles, channels, tile_height, tile_width
@@ -228,7 +344,7 @@ class DifferentiableMllamaImageProcessor():
         for image in image_list:
             data_list.append([self.process(image)["pixel_values"]])
 
-        images, num_tiles = pack_images(data_list, self.max_image_tiles)
+        images, num_tiles = self.pack_images(data_list, self.max_image_tiles)
 
         return {
             "pixel_values": images,
