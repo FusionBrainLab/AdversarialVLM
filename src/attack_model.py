@@ -11,6 +11,7 @@ import wandb  # Import WandB
 import random  # Added import for random sampling
 
 from processors import load_components
+from train_test import run_model_test
 
 def setup_device():
     """Setup computing device."""
@@ -30,11 +31,11 @@ def save_checkpoint(image: Image.Image, tensor: torch.Tensor, path: str, iterati
 def initialize_wandb(exp_name, config):
     """Initialize WandB for experiment tracking."""
     wandb.init(
-        project="image_attack_optimization",  # Replace with your project name
+        project="image_attack_optimization",
         name=exp_name,
         config=config,  # Logging configuration
         tags=["image-attack", "training", "transformers"],
-        mode="online"  # Change to "offline" if you want to run without internet
+        mode="online"
     )
 
 def log_metrics_wandb(
@@ -42,8 +43,7 @@ def log_metrics_wandb(
         loss: torch.Tensor,
         final_image: np.array,
         final_tensor: torch.Tensor,
-        device: torch.device,
-        generated_table: str,
+        generated_table: wandb.Table,
         save_steps: int
     ):
     """Logs metrics and images to WandB."""
@@ -115,12 +115,17 @@ def train(
     mask_type,            # Added for mask selection
     mask_size,            # Added for mask size
     clamp_method,         # Added for clamping method
-    start_from_white      # Added for starting from white image
+    start_from_white,      # Added for starting from white image
+    target_text_random
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
     from answers import answers, adv_answers
     questions = not_safe_questions + questions 
+    
+    if target_text_random:
+        target_text = answers + adv_answers
+    
     if prompt != "list":
         questions = [prompt]
 
@@ -196,7 +201,10 @@ def train(
     })
 
     min_losses = []
-    generated_table_list = []
+
+    # Создаём таблицу для логгирования выводов моделей
+    model_outputs_table = wandb.Table(columns=["iteration"] + [model_name])
+
 
     # Gradient accumulation variables
     global_iteration = 0
@@ -217,7 +225,7 @@ def train(
         target_text=target_text)
 
     for iteration in tqdm(range(num_iterations)):
-        if len(inputs_processor.target_texts) > 1:
+        if target_text_random:
             random_text = random.choice(inputs_processor.target_texts)
             inputs_processor.set_target_text(random_text)
         
@@ -332,6 +340,7 @@ def train(
             img = Image.open(img_path).convert("RGB")
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
+            """
             inputs_for_inference = inputs_processor.get_inputs_inference(img)
             
             outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
@@ -340,8 +349,33 @@ def train(
             print("generated_text:", generated_text)
             generated_table_list.append([generated_text])
             generated_table = wandb.Table(data=generated_table_list, columns=["Generated Text"])
+            """
             
-            log_metrics_wandb(iteration, loss, final_image, (x + x_0), device, generated_table, save_steps)
+            iteration_outputs = [iteration]  # Первая колонка — номер итерации
+    
+            models_output, wandb_log = run_model_test(
+                models=[model],
+                processors=[processor],
+                inputs_processors=[inputs_processor],
+                model_names=[model_name],
+                not_safe_questions_test=not_safe_questions_test,
+                target_text=inputs_processor.target_texts[0],
+                exp_path=exp_path,
+                iteration=iteration,
+                img=img
+            )
+            
+            wandb.log(wandb_log)
+
+            # Добавляем строку в таблицу
+            iteration_outputs = iteration_outputs + models_output[1:]
+            
+            print("Question:", models_output[0])
+            print(f"Model {model_name} output:", models_output[1])
+            
+            model_outputs_table.add_data(*iteration_outputs)
+            
+            log_metrics_wandb(iteration, loss, final_image, (x + x_0), model_outputs_table, save_steps)
 
         # Clip everything
         if restart_num > 0 and (iteration + 1) % restart_num == 0:
@@ -408,7 +442,8 @@ def main():
         mask_type=args.mask_type,                  # Passed new argument
         mask_size=args.mask_size,                  # Passed new argument
         clamp_method=args.clamp_method,            # Passed new argument
-        start_from_white=args.start_from_white     # Passed new argument
+        start_from_white=args.start_from_white,
+        target_text_random=args.target_text_random
     )
 
 if __name__ == "__main__":

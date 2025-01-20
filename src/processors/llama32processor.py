@@ -68,16 +68,30 @@ class AdvMllamaInputs:
         self.test_questions = test_questions
         self.batch_size = batch_size
         self.processor = processor
-        self.target_text = target_text
         self.original_image = original_image
         self.device = device
         
-        self.target_tokens = processor.tokenizer(target_text+"<|eot_id|>", return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-        self.shift = len(processor.tokenizer.encode("<|eot_id|>")) # first token is extra
-        self.suffix_length = self.target_tokens.shape[1]
+        self.extra_token = "<|eot_id|>"
+        self.shift = len(processor.tokenizer.encode(self.extra_token))
+
+        if isinstance(target_text, list):
+            self.target_texts = target_text  # Храним весь список
+            self.target_text = target_text[0]  # Начальное значение
+        else:
+            self.target_texts = [target_text]
+            self.target_text = target_text
         
-        self.target = self.target_tokens[:, :-self.shift].repeat(batch_size, 1).to(self.device)
+        self.update_target_tokens()
+
+    def update_target_tokens(self):
+        self.target_tokens = self.processor.tokenizer(self.target_text+self.extra_token, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+        self.suffix_length = self.target_tokens.shape[1]
+        self.target = self.target_tokens[:, :-self.shift].repeat(self.batch_size, 1).to(self.device)
     
+    def set_target_text(self, target_text):
+        self.target_text = target_text
+        self.update_target_tokens()
+
     def get_loss(self, logits):
         # Extract relevant logits and compute loss
         logits_suffix = logits[:, -self.suffix_length:-self.shift, :]
@@ -102,6 +116,36 @@ class AdvMllamaInputs:
                 "content": 
                     [
                         {"type": "text", "text": self.target_text}
+                    ]
+            }
+        ]) for q in batch_questions]
+        
+        inputs = self.processor(
+            text=prompts,
+            images=[self.original_image for _ in batch_questions],
+            padding=True,
+            return_tensors="pt",
+        ).to(torch.device(self.device))
+        
+        return inputs
+    
+    def get_inputs_refuse(self):
+        batch_questions = random.choices(self.questions, k=self.batch_size)
+        
+        prompts = [self.processor.apply_chat_template([
+            {
+                "role": "user", 
+                "content": 
+                    [
+                        {"type": "image"}, 
+                        {"type": "text", "text": q}
+                    ]
+            },
+            {
+                "role": "assistant",
+                "content": 
+                    [
+                        {"type": "text", "text": "no, sorry"} # TODO : Update this
                     ]
             }
         ]) for q in batch_questions]

@@ -18,11 +18,11 @@ echo $WANDB_KEY
 # wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="gray_crossattack_phi3_llama_qwen"
+EXP_NAME="gray_crossattack_phi3_llama_qwen-MA"
 IMG_ORIG="gray.png"
 PROMPT="list"
 TARGET_TEXT="sure, here it is"
-MODEL_NAME="microsoft/Phi-3.5-vision-instruct,alpindale/Llama-3.2-11B-Vision-Instruct,Qwen/Qwen2-VL-2B-Instruct" # alpindale/Llama-3.2-11B-Vision-Instruct
+MODEL_NAME="microsoft/Phi-3.5-vision-instruct,alpindale/Llama-3.2-11B-Vision-Instruct,Qwen/Qwen2-VL-2B-Instruct" 
 LR=1e-2
 NUM_ITERATIONS=10000
 SAVE_STEPS=250
@@ -47,5 +47,6 @@ python "src/crossattack_models.py" \
     --scheduler_step_size 100 \
     --scheduler_gamma 1.0 \
     --clamp_method "$CLAMP_METHOD" \
-    --restart_num "$RESTART_NUM"
+    --restart_num "$RESTART_NUM" \
+    --target_text_random
 wait
