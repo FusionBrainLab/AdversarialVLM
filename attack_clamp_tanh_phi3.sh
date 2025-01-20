@@ -18,7 +18,7 @@ echo $WANDB_KEY
 # wandb login "$WANDB_KEY"
 
 # Define all required arguments for the Python script
-EXP_NAME="gray_Phi-3.5"
+EXP_NAME="gray_Phi-3.5-MA-vs-test"
 IMG_ORIG="gray.png"
 PROMPT="list"
 TARGET_TEXT="sure, here it is!"
@@ -33,7 +33,7 @@ RESTART_NUM=0  # Restart optimizer every RESTART_NUM iterations
 
 # Run the Python script with all arguments
 wandb online
-CUDA_VISIBLE_DEVICES=4 python "src/attack_model.py" \
+CUDA_VISIBLE_DEVICES=3 python "src/attack_model.py" \
     --exp_name "$EXP_NAME" \
     --img_orig "$IMG_ORIG" \
     --prompt "$PROMPT" \
@@ -47,5 +47,5 @@ CUDA_VISIBLE_DEVICES=4 python "src/attack_model.py" \
     --scheduler_step_size 100 \
     --scheduler_gamma 1.0 \
     --clamp_method "$CLAMP_METHOD" \
-    --restart_num "$RESTART_NUM"
+    --restart_num "$RESTART_NUM"    --target_text_random
 wait

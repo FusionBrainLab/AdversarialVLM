@@ -30,16 +30,30 @@ class AdvQwen2VLInputs:
         self.test_questions = test_questions
         self.batch_size = batch_size
         self.processor = processor
-        self.target_text = target_text
         self.original_image = original_image
         self.device = device
         
-        self.target_tokens = processor.tokenizer(target_text+"<|im_end|>\n", return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-        self.shift = len(processor.tokenizer.encode("<|im_end|>\n"))
-        self.suffix_length = self.target_tokens.shape[1]
+        self.extra_token = "<|im_end|>\n"
+        self.shift = len(processor.tokenizer.encode(self.extra_token))
+
+        if isinstance(target_text, list):
+            self.target_texts = target_text  # Храним весь список
+            self.target_text = target_text[0]  # Начальное значение
+        else:
+            self.target_texts = [target_text]
+            self.target_text = target_text
         
-        self.target = self.target_tokens[:, :-self.shift].repeat(batch_size, 1).to(self.device)
+        self.update_target_tokens()
+
+    def update_target_tokens(self):
+        self.target_tokens = self.processor.tokenizer(self.target_text+self.extra_token, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+        self.suffix_length = self.target_tokens.shape[1]
+        self.target = self.target_tokens[:, :-self.shift].repeat(self.batch_size, 1).to(self.device)
     
+    def set_target_text(self, target_text):
+        self.target_text = target_text
+        self.update_target_tokens()
+
     def get_loss(self, logits):
         # Extract relevant logits and compute loss
         logits_suffix = logits[:, -self.suffix_length:-self.shift, :]
@@ -102,10 +116,6 @@ class AdvQwen2VLInputs:
 
 class DifferentiableQwen2VLImageProcessor():
     def __init__(self, orig_processor, device):
-        """
-        orig_processor : 
-        
-        """
         self.orig_processor = orig_processor
         self.device = device
         

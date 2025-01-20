@@ -134,11 +134,17 @@ def train(
     mask_type,            # Added for mask selection
     mask_size,            # Added for mask size
     clamp_method,         # Added for clamping method
-    start_from_white      # Added for starting from white image
+    start_from_white,      # Added for starting from white image
+    target_text_random
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
+    from answers import answers, adv_answers
     questions = not_safe_questions + questions 
+    
+    if target_text_random:
+        target_text = answers + adv_answers
+    
     if prompt != "list":
         questions = [prompt]
 
@@ -234,7 +240,8 @@ def train(
 
     # Создаём таблицу для логгирования выводов моделей
     model_outputs_table = wandb.Table(columns=["iteration"] + model_names)
-    
+
+
     # Gradient accumulation variables
     global_iteration = 0
     accumulated_loss = 0
@@ -245,6 +252,10 @@ def train(
     # Compute target tokens ones
 
     for iteration in tqdm(range(num_iterations)):
+        if target_text_random:
+            random_text = random.choice(inputs_processor.target_texts)
+            for inputs_processor in inputs_processors:
+                inputs_processor.set_target_text(random_text)
         # Update mask for random square
         if mask_type == 'random_square':
             raise NotImplementedError
@@ -390,7 +401,7 @@ def train(
                 inputs_processors=inputs_processors,
                 model_names=model_names,
                 not_safe_questions_test=not_safe_questions_test,
-                target_text=target_text,
+                target_text="sure, here it is",
                 exp_path=exp_path,
                 iteration=iteration,
                 img=img
@@ -455,7 +466,8 @@ def main():
     parser.add_argument("--mask_size", type=int, default=None, help="Size parameter for the mask (n for corner or random_square, k for bottom_lines).")  # Added argument
     parser.add_argument("--clamp_method", type=str, default='clamp', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Added argument
     parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")  # Added argument
-
+    parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
+    
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -478,7 +490,8 @@ def main():
         mask_type=args.mask_type,                  # Passed new argument
         mask_size=args.mask_size,                  # Passed new argument
         clamp_method=args.clamp_method,            # Passed new argument
-        start_from_white=args.start_from_white     # Passed new argument
+        start_from_white=args.start_from_white,
+        target_text_random=args.target_text_random
     )
 
 if __name__ == "__main__":
