@@ -9,6 +9,7 @@ import os
 import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
+from torchvision.transforms import GaussianBlur # Additional regularization for noise
 
 from processors import load_components
 from train_test import run_model_test
@@ -83,17 +84,17 @@ def image_fit_loss(
         upper_bound, 
         center_force = 0.9
     ):
-    # Считаем сумму
+    # We compute the sum
     x_sum = (x_0 + x)
     
     lower_bound = torch.zeros(x_sum.shape).to(x_sum.device)
     upper_bound = torch.ones(x_sum.shape).to(x_sum.device)
     
-    # Рассчитываем штраф за выход за границы
-    lower_penalty = torch.relu(center_force*lower_bound - x_sum)  # если x_sum меньше нижней границы
-    upper_penalty = torch.relu(x_sum - center_force*upper_bound)  # если x_sum больше верхней границы
+    # Penalty for out-of-bounds
+    lower_penalty = torch.relu(center_force*lower_bound - x_sum)  # if x_sum < center_force*lower_bound
+    upper_penalty = torch.relu(x_sum - center_force*upper_bound)  # if x_sum > center_force*upper_bound
     
-    # Используем MSE лосс как штраф
+    # MSE-based penalty
     penalty = torch.mean(lower_penalty**2 + upper_penalty**2)
     
     return penalty
@@ -134,13 +135,22 @@ def train(
     mask_type,            # Added for mask selection
     mask_size,            # Added for mask size
     clamp_method,         # Added for clamping method
-    start_from_white,      # Added for starting from white image
-    target_text_random
+    start_from_white,     # Added for starting from white image
+    target_text_random,
+    DPO_flag = True,
+    refuse_prob = 0.1,
+    model_weights = None,  # <-- NEW
+    attack_norm = 0.5,
+    # gaussian blur
+    use_gaussian_blur = False,
+    gblur_kernel_size = 5
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
     from answers import answers, adv_answers
     questions = not_safe_questions + questions 
+
+    refuse_flag = False
     
     if target_text_random:
         target_text = answers + adv_answers
@@ -159,6 +169,12 @@ def train(
     else:
         raise FileNotFoundError(f"Cannot find {img_orig}")
     print("Original image size: ", original_image.size)
+
+    # Initialize gaussian blur object
+    if use_gaussian_blur:
+        gaussian_blur = GaussianBlur(kernel_size=gblur_kernel_size)
+    else:
+        gaussian_blur = None
 
     # Load model and processor
     devices = []
@@ -187,27 +203,28 @@ def train(
         adv_processors.append(adv_processor)
         inputs_processors.append(inputs_processor)
     
-    device_last = setup_device(3)
+    device_last = setup_device(len(devices) - 1)
 
     x_0 = pil_to_tensor(original_image, resize=False, do_convert_rgb=adv_processors[0].do_convert_rgb).to(device_last)
-    # print("New tensor size: ", x_0.shape)
-
+    # Initialize or override model_weights if needed
+    if model_weights is None:
+        # If not provided, default each model to weight 1.0
+        model_weights = [1.0]*len(models)
+    elif len(model_weights) != len(models):
+        raise ValueError("The length of model_weights must match the number of model_names.")
+    
     # Initialize x and optimizer based on clamping method
     if clamp_method == 'tanh':
         p = torch.zeros(x_0.shape, requires_grad=True, device=device_last)
-        # x = 0.1 * torch.tanh(p)
         optimizer = torch.optim.AdamW([p], lr=lr)
     else:
-        raise NotImplementedError("Clamping method except tanh are not implemented")
-        # x = torch.zeros(x_0.shape, requires_grad=True, device=device)
-        # optimizer = torch.optim.AdamW([x], lr=lr)
+        raise NotImplementedError("Clamping method except tanh are not implemented yet.")
     
     # Create mask
     if mask_type is not None and mask_size is not None:
         mask = create_mask(mask_type, mask_size, x_0.shape, device_last)
     else:
         mask = (x_0 != 0).int()
-        # mask = torch.ones_like(x_0).to(device)
 
     # save mask
     torch.save(mask, os.path.join(exp_path, 'mask.pt'))
@@ -233,7 +250,11 @@ def train(
         "mask_type": mask_type,
         "mask_size": mask_size,
         "clamp_method": clamp_method,
-        "start_from_white": start_from_white
+        "start_from_white": start_from_white,
+        "DPO_flag": DPO_flag,
+        "refuse_prob": refuse_prob,
+        "attack_norm": attack_norm,
+        "model_weights": model_weights
     })
 
     min_losses = []
@@ -246,35 +267,68 @@ def train(
     global_iteration = 0
     accumulated_loss = 0
     
-    # Std of difference between x_resaved and x_0 + x, used for updatind noise.std
+    # Std of difference between x_resaved and x_0 + x, used for updating noise.std
     resave_error_std = 0.001
     
-    # Compute target tokens ones
-
     for iteration in tqdm(range(num_iterations)):
-        if target_text_random:
-            random_text = random.choice(inputs_processor.target_texts)
-            for inputs_processor in inputs_processors:
-                inputs_processor.set_target_text(random_text)
-        # Update mask for random square
+        # Possibly switch target_text if DPO_flag or random
+        if DPO_flag or target_text_random:
+            coin = random.random()
+            print("coin:", coin)
+            if DPO_flag and coin < refuse_prob:
+                for inputs_processor in inputs_processors:
+                    random_text = random.choice(inputs_processor.refuses)
+                    inputs_processor.set_target_text(random_text)
+                refuse_flag = True
+            elif target_text_random:
+                random_text = random.choice(inputs_processor.target_texts)
+                for inputs_processor in inputs_processors:
+                    inputs_processor.set_target_text(random_text)
+                refuse_flag = False
+            else:
+                random_text = target_text
+                for inputs_processor in inputs_processors:
+                    inputs_processor.set_target_text(random_text)
+                refuse_flag = False
+            print(f"{refuse_flag} text:", random_text)
+        
+        # Update mask for random square (if needed)
         if mask_type == 'random_square':
-            raise NotImplementedError
+            raise NotImplementedError("Dynamic random-square mask updating not implemented.")
+
         # Prepare image input for training
         if clamp_method == 'tanh':
-            x = 0.5 * torch.tanh(p)
-        
+            x = attack_norm * torch.tanh(p)
+
+        ## Apply gaussian blur to trained x and save it later 
+        if use_gaussian_blur:
+            x = gaussian_blur(x)
+
         inputss = []
         pgrads = []
         losses = []
+        
+        # Calculate penalty-based loss for staying in valid image range
+        img_loss = image_fit_loss(x_0, x, 0, 1)
+
+        # Zero out the gradient at the start of each iteration
+        if p.grad is not None:
+            p.grad.zero_()
+
         for i, inputs_processor in enumerate(inputs_processors):
             inputs = inputs_processor.get_inputs_train()
             inputss.append(inputs)
              
-            pixel_values = adv_processors[i].process((x_0+x).to(devices[i]))["pixel_values"]
-        
+            ## Apply gaussian blur to pixel_values for training only (helpfulnes is under question)
+            # if use_gaussian_blur:
+            #     pixel_values = adv_processors[i].process(x_0 +gaussian_blur(x).to(devices[i]))["pixel_values"]
+            # else:
+            pixel_values = adv_processors[i].process((x_0 + x).to(devices[i]))["pixel_values"]
+
             repeat_size = len(pixel_values.shape)*[1]
             repeat_size[0] = batch_size
             pixel_values = pixel_values.repeat(repeat_size)
+
             noise = torch.randn_like(pixel_values).to(device_last) * resave_error_std
             inputs['pixel_values'] = pixel_values + noise.to(devices[i])
             
@@ -282,25 +336,32 @@ def train(
             outputs = models[i](**inputs)
             logits = outputs.logits[:, :-1, :]
             
-            loss = inputs_processor.get_loss(logits)
-            losses.append(loss.item())
-            accumulated_loss += loss.item()
+            model_loss = inputs_processor.get_loss(logits)
+            total_loss = model_weights[i] * model_loss + img_loss.to(devices[i]).clone()
+
+            losses.append(total_loss.item())
+            accumulated_loss += total_loss.item()
+
             if i < len(devices) - 1:
-                loss.backward(retain_graph=True)    
+                total_loss.backward(retain_graph=True)
             else:
-                loss.backward()
-            print(p.grad.norm())
-            pgrads.append(p.grad.to(device_last))
+                total_loss.backward()
 
-            print(f"Loss for model {i}: ", loss)
- 
-        p.grad = torch.stack(pgrads).sum(dim=0)
+            # # gradient graph will be reset after image range loss
+            # total_loss.backward(retain_graph=True)
+            
+            # Store gradient, then reset
+            pgrads.append(p.grad.to(device_last).clone())
+            p.grad.zero_()
+            
+        # img_loss.backward()
+        # pgrads.append(p.grad.to(device_last).clone())
+        # p.grad.zero_()
         
-        # img_loss = image_fit_loss(x_0, x, 0, 1)
-        # loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
-        # accumulated_loss += loss.item()
-        # loss.backward()
+        # Sum up all model gradients in pgrads
+        p.grad = torch.stack(pgrads).sum(dim=0)
 
+        # Apply mask to gradient
         # Apply mask to gradients
         if clamp_method == 'tanh':
             p.grad = p.grad * mask
@@ -315,8 +376,7 @@ def train(
             optimizer.zero_grad()
             scheduler.step()  # Update the learning rate according to the scheduler
             
-            # Optional: Print/log the accumulated loss and gradient norm
-            # print(f"Step {global_iteration}, Accumulated Loss: {accumulated_loss}, Grad Norm: {grad_norm.item()}")
+            # Log the accumulated loss
             wandb.log({
                 "accumulated_loss": accumulated_loss,
             })
@@ -331,10 +391,10 @@ def train(
         else:
             NotImplementedError("Clamping method except tanh and none are not implemented")
 
-        min_losses.append(loss.item())
+        min_losses.append(sum(losses)/len(losses))
 
         with torch.no_grad():
-            # Copy the sum to another tensor and resave image to count error
+            # Copy the sum to another tensor and re-save image to measure error
             x_mod = (x_0 + x).clone().detach().to(device_last)
             img = adv_processors[0].tensor2pil(x_mod)
             img.save('tmp.png')
@@ -342,7 +402,7 @@ def train(
             
             resave_error_std = (x_mod_resaved - x_mod).abs().std()
             
-            # Forward and loss for the resaved image
+            # Evaluate the re-saved image for logging
             resaved_losses = []
             for i, inputs in enumerate(inputss):
                 pixel_values = adv_processors[i].process(x_mod_resaved.to(devices[i]))['pixel_values']
@@ -353,9 +413,9 @@ def train(
                 logits = outputs.logits[:, 0:-1, :]
                 resaved_losses.append(inputs_processors[i].get_loss(logits))
             
-            resaved_loss = torch.tensor([loss.item() for loss in resaved_losses]).mean()
-        
-        # Log metrics dynamically based on the number of models
+            resaved_loss = torch.tensor([ls.item() for ls in resaved_losses]).mean()
+
+        # Log metrics
         wandb_log_data = {
             "loss_resaved": resaved_loss.item(),
             "iteration": iteration,
@@ -367,34 +427,32 @@ def train(
             "resave_error_l1": (x_mod_resaved - x_mod).abs().sum(),
             "noise_mean": noise.mean(),
             "noise_std": noise.std(),
-            "loss": loss.item(),
+            "loss_per_iteration": sum(losses)/len(losses),
+            "img_loss": img_loss.item(),  # <-- Log image penalty
             "global_iteration": global_iteration,
-            "grad norm": grad_norm
+            "grad_norm": grad_norm,
+            "use_gaussian_blur": use_gaussian_blur,
+            "gblur_kernel_size": gblur_kernel_size
         }
 
-        # Add losses for each model dynamically
-        for i, model_loss in enumerate(losses):
+        # Also log each model's partial loss
+        for i, loss_val in enumerate(losses):
             mn = model_names[i].replace("/", "_")
-            wandb_log_data[f"loss_{i}_{mn}"] = model_loss
+            wandb_log_data[f"loss_{i}_{mn}"] = loss_val
 
-        # Log all collected data to WandB
         wandb.log(wandb_log_data)
 
         # Every `save_steps`, run inference and log results
         if iteration % save_steps == 0 or iteration == num_iterations - 1:
-            # Generate output for the current attacked image using only the prompt
-
-            # Save checkpoints
             x_mod = (x_0 + x).clone().detach()
-            final_image = adv_processor.tensor2pil(x_mod)
+            final_image = adv_processors[0].tensor2pil(x_mod)
             save_checkpoint(final_image, x + x_0, exp_path, global_iteration)
             
             img_path = os.path.join(exp_path, f"optimized_image_iter_{global_iteration}.png")
-            img = Image.open(img_path).convert("RGB")
-            # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
+            img_for_test = Image.open(img_path).convert("RGB")
             
-            iteration_outputs = [iteration]  # Первая колонка — номер итерации
-    
+            iteration_outputs = [iteration]  # first column is iteration
+
             models_output, wandb_log = run_model_test(
                 models=models,
                 processors=processors,
@@ -404,26 +462,23 @@ def train(
                 target_text="sure, here it is",
                 exp_path=exp_path,
                 iteration=iteration,
-                img=img
+                img=img_for_test
             )
             
             wandb.log(wandb_log)
 
-            # Добавляем строку в таблицу
             iteration_outputs = iteration_outputs + models_output[1:]
-            
             print("Question:", models_output[0])
-            for ans in models_output[1:]:
+            for i, ans in enumerate(models_output[1:]):
                 print(f"Model {model_names[i]} output:", ans)
             
             model_outputs_table.add_data(*iteration_outputs)
             
-            log_metrics_wandb(iteration, loss, final_image, (x + x_0), model_outputs_table, save_steps)
+            log_metrics_wandb(iteration, sum(losses)/len(losses), final_image, (x + x_0), model_outputs_table, save_steps)
 
-        # Clip everything
+        # If configured, clamp/clip every restart_num steps
         if restart_num > 0 and (iteration + 1) % restart_num == 0:
             with torch.no_grad():
-                # x.clamp_(min=-0.1, max=0.1)
                 y = (x + x_0).clamp(0.0, 1.0).mul(255).to(torch.uint8)
                 x_new = y - x_0
                 wandb.log({
@@ -432,14 +487,11 @@ def train(
                 })
                 x = x_new.clone()
         
-        # Logging
-        # print(f"Iteration {global_iteration}, Loss: {loss.item()}")
-
     # Final image save
-    final_image = adv_processor.tensor2pil(final_image)
+    x_mod = (x_0 + x).clone().detach()
+    final_image = adv_processors[0].tensor2pil(x_mod)
     save_checkpoint(final_image, x + x_0, exp_path, "final")
 
-    # Finish WandB run
     wandb.finish()
 
 
@@ -464,10 +516,23 @@ def main():
     parser.add_argument("--restart_num", type=int, default=0, help="Number of steps after which to restart the optimizer (0 means no restart).")  # Added argument
     parser.add_argument("--mask_type", type=str, default=None, choices=['corner', 'bottom_lines', 'random_square'], help="Type of mask to apply.")  # Added argument
     parser.add_argument("--mask_size", type=int, default=None, help="Size parameter for the mask (n for corner or random_square, k for bottom_lines).")  # Added argument
-    parser.add_argument("--clamp_method", type=str, default='clamp', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Added argument
+    parser.add_argument("--clamp_method", type=str, default='tanh', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Updated default
     parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")  # Added argument
     parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
-    
+    parser.add_argument("--DPO_flag", action='store_true', help="DPO flag")
+    parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability of using refusing answers. Used if DPO_flag is True.")
+    parser.add_argument("--attack_norm", type=float, default=0.4, help="Decrease to make attack more imperceptable. Values from 0 (no attack) to 0.5-0.6 (may lead to increased img resaving loss).")
+    parser.add_argument("--use_gaussian_blur", action='store_true', help="Use gaussian blur for training.")
+    parser.add_argument("--gblur_kernel_size", type=int, default=5, help="Kernel size for gaussian blur.")
+    # NEW ARGUMENT FOR MODEL WEIGHTS
+    parser.add_argument(
+        "--model_weights",
+        type=float,
+        nargs='+',
+        default=None,
+        help="Loss weights for each model, must match length of model_names (default is 1.0 for each)."
+    )
+
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -486,12 +551,18 @@ def main():
         grad_accum_steps=args.grad_accum_steps,
         scheduler_step_size=args.scheduler_step_size,
         scheduler_gamma=args.scheduler_gamma,
-        restart_num=args.restart_num,              # Passed new argument
-        mask_type=args.mask_type,                  # Passed new argument
-        mask_size=args.mask_size,                  # Passed new argument
-        clamp_method=args.clamp_method,            # Passed new argument
+        restart_num=args.restart_num,
+        mask_type=args.mask_type,
+        mask_size=args.mask_size,
+        clamp_method=args.clamp_method,
         start_from_white=args.start_from_white,
-        target_text_random=args.target_text_random
+        target_text_random=args.target_text_random,
+        DPO_flag=args.DPO_flag,
+        refuse_prob=args.refuse_prob,
+        model_weights=args.model_weights,  # Pass the new weights argument
+        attack_norm=args.attack_norm,
+        use_gaussian_blur=args.use_gaussian_blur,
+        gblur_kernel_size=args.gblur_kernel_size
     )
 
 if __name__ == "__main__":
