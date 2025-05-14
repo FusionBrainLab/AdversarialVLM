@@ -1,10 +1,13 @@
+import sys 
+sys.path = [p for p in sys.path if p != '/home/jovyan/.imgenv-razzhigaev-small-1-0/lib/python3.7/site-packages'] 
+
 from datetime import datetime
 import torch
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoModelForCausalLM
+# from transformers import AutoProcessor, AutoModelForCausalLM
 import os
 import argparse
 import wandb  # Import WandB
@@ -12,6 +15,8 @@ import random  # Added import for random sampling
 
 from processors import load_components
 from train_test import run_model_test
+
+from torchvision.transforms import GaussianBlur # Additional regularization for noise
 
 def setup_device():
     """Setup computing device."""
@@ -115,8 +120,15 @@ def train(
     mask_type,            # Added for mask selection
     mask_size,            # Added for mask size
     clamp_method,         # Added for clamping method
+    epsilon,              # Added for epsilon in 4.2.3. IMPLEMENTATION DETAILS
+    sigma,                # Added for sigma in 4.2.3. IMPLEMENTATION DETAILS
     start_from_white,      # Added for starting from white image
-    target_text_random
+    target_text_random,
+    DPO_flag = True,
+    refuse_prob = 0.1,
+    # gaussian blur
+    use_gaussian_blur = False,
+    gblur_kernel_size = 5
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
@@ -166,6 +178,12 @@ def train(
         # x = torch.zeros(x_0.shape, requires_grad=True, device=device)
         # optimizer = torch.optim.AdamW([x], lr=lr)
 
+    # Initialize gaussian blur object
+    if use_gaussian_blur:
+        gaussian_blur = GaussianBlur(kernel_size=gblur_kernel_size)
+    else:
+        gaussian_blur = None
+
     # Create mask
     if mask_type is not None and mask_size is not None:
         mask = create_mask(mask_type, mask_size, x_0.shape, device)
@@ -197,7 +215,12 @@ def train(
         "mask_type": mask_type,
         "mask_size": mask_size,
         "clamp_method": clamp_method,
-        "start_from_white": start_from_white
+        "epsilon": epsilon,
+        "sigma": sigma,
+        "start_from_white": start_from_white,
+        # gaussian blur 
+        "use_gaussian_blur": use_gaussian_blur,
+        "gblur_kernel_size": gblur_kernel_size,
     })
 
     min_losses = []
@@ -210,10 +233,8 @@ def train(
     global_iteration = 0
     accumulated_loss = 0
     
-    # Std of difference between x_resaved and x_0 + x, used for updatind noise.std
-    resave_error_std = 0.001
-    
-    # Compute target tokens ones
+    # Std of difference between x_resaved and x_0 + x, used for updatind noise.std. Sigma squared from the paper.
+    resave_error_std = sigma # 0.001
     
     inputs_processor = AdvInputs(
         questions=questions, 
@@ -223,14 +244,27 @@ def train(
         processor=processor, 
         device=device, 
         target_text=target_text)
-
+    
+    refuse_flag = False
+    
     for iteration in tqdm(range(num_iterations)):
-        if target_text_random:
-            random_text = random.choice(inputs_processor.target_texts)
+        if DPO_flag or target_text_random:
+            coin = random.random()
+            print("coin:", coin)
+            if DPO_flag and coin < refuse_prob:
+                random_text = random.choice(inputs_processor.refuses)
+                refuse_flag = True
+            elif target_text_random:
+                random_text = random.choice(inputs_processor.target_texts)
+                refuse_flag = False
+            else:
+                random_text = target_text
+                refuse_flag = False
+
+            print(f"{refuse_flag} text:", random_text)
             inputs_processor.set_target_text(random_text)
         
         inputs = inputs_processor.get_inputs_train()
-        #inputs = processor(text=prompts, images=[original_image for _ in batch_questions], return_tensors="pt", padding=True).to(device)
         
         # Update mask for random square
         if mask_type == 'random_square':
@@ -238,8 +272,18 @@ def train(
 
         # Prepare image input for training
         if clamp_method == 'tanh':
-            x = 0.1 * torch.tanh(p)
+            x = epsilon * torch.tanh(p)
+        
+        ## Apply gaussian blur to trained x and save it later 
+        if use_gaussian_blur:
+            x = gaussian_blur(x)
         pixel_values = adv_processor.process(x_0+x)["pixel_values"]
+
+        # ## Apply gaussian blur to pixel_values for training only 
+        # if use_gaussian_blur:
+        #     pixel_values = adv_processor.process(x_0+gaussian_blur(x))["pixel_values"]
+        # else: 
+        #     pixel_values = adv_processor.process(x_0+x)["pixel_values"]
         
         repeat_size = len(pixel_values.shape)*[1]
         repeat_size[0] = batch_size
@@ -253,6 +297,7 @@ def train(
         logits = outputs.logits[:, :-1, :]
 
         loss = inputs_processor.get_loss(logits)
+        loss = -loss if refuse_flag else loss
         img_loss = image_fit_loss(x_0, x, 0, 1)
         loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
         accumulated_loss += loss.item()
@@ -306,8 +351,7 @@ def train(
             resaved_loss = inputs_processor.get_loss(logits)
 
         # Log metrics
-        wandb.log({
-            "loss": loss.item(), 
+        wandb_log_data = {
             "image_loss": img_loss.item(),
             "loss_resaved": resaved_loss.item(),
             "iteration": iteration, 
@@ -319,13 +363,20 @@ def train(
             "resave_error_l1": (x_mod_resaved - x_mod).abs().sum(),
             "noise_mean": noise.mean(),
             "noise_std": noise.std(),
-            "loss": loss.item(),
             "global_iteration": global_iteration,
+            "sigma": sigma,
             "adversarial_mean": x.mean(),
             "adversarial_std": x.std(),
             "lr": scheduler.get_last_lr()[0],
             "grad norm": grad_norm
-        })
+        }
+        
+        if refuse_flag:
+            wandb_log_data["loss_refuse"] = loss.item()
+        else:
+            wandb_log_data["loss"] = loss.item()
+        
+        wandb.log(wandb_log_data)
 
         # Every `save_steps`, run inference and log results
         if iteration % save_steps == 0 or iteration == num_iterations - 1:
@@ -393,7 +444,8 @@ def train(
         # print(f"Iteration {global_iteration}, Loss: {loss.item()}")
 
     # Final image save
-    final_image = adv_processor.tensor2pil(final_image)
+    x_mod = (x_0 + x).clone().detach()
+    final_image = adv_processor.tensor2pil(x_mod)
     save_checkpoint(final_image, x + x_0, exp_path, "final")
 
     # Finish WandB run
@@ -419,12 +471,24 @@ def main():
     parser.add_argument("--clamp_method", type=str, default='clamp', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Added argument
     parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")  # Added argument
     parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
+    parser.add_argument("--DPO_flag", action='store_true', help="DPO flag")
+    parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability using refusing answers. Is used, if DPO_flag is True.")
+    # epsilon from 4.2.3. IMPLEMENTATION DETAILS
+    parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon hparam for bounding g(z_1).")
+    # sigma squared from 4.2.3. IMPLEMENTATION DETAILS
+    parser.add_argument("--sigma", type=float, default=0.001, help="Sigma squared hparam for 'enhance robustness' or `resave_error_std` from code.")
+    # gaussian blur
+    parser.add_argument("--use_gaussian_blur", action='store_true', help="Use gaussian blur for optimized attack image.")
+    parser.add_argument("--gblur_kernel_size", type=int, default=5, help="Kernel size for gaussian blur.")
     
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique_exp_name = f"{args.exp_name}_{timestamp}"
 
+    print("params:", args)
+    print("use_gaussian_blur:", args.use_gaussian_blur, type(args.use_gaussian_blur))
+    print("gblur_kernel_size:", args.gblur_kernel_size, type(args.gblur_kernel_size))
     train(
         exp_name=unique_exp_name,
         img_orig=args.img_orig,
@@ -442,8 +506,14 @@ def main():
         mask_type=args.mask_type,                  # Passed new argument
         mask_size=args.mask_size,                  # Passed new argument
         clamp_method=args.clamp_method,            # Passed new argument
+        epsilon=args.epsilon,
+        sigma=args.sigma,
         start_from_white=args.start_from_white,
-        target_text_random=args.target_text_random
+        target_text_random=args.target_text_random,
+        DPO_flag = args.DPO_flag,
+        refuse_prob = args.refuse_prob,
+        use_gaussian_blur = args.use_gaussian_blur,
+        gblur_kernel_size = args.gblur_kernel_size
     )
 
 if __name__ == "__main__":
