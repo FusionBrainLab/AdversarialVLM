@@ -16,6 +16,7 @@ import random  # Added import for random sampling
 from processors import load_components
 from train_test import run_model_test
 
+from torchvision.transforms import RandomResizedCrop
 from torchvision.transforms import GaussianBlur # Additional regularization for noise
 
 def setup_device():
@@ -124,11 +125,18 @@ def train(
     sigma,                # Added for sigma in 4.2.3. IMPLEMENTATION DETAILS
     start_from_white,      # Added for starting from white image
     target_text_random,
-    DPO_flag = True,
-    refuse_prob = 0.1,
+    DPO_flag = False,
+    refuse_prob = 0.1, # deprecated
     # gaussian blur
     use_gaussian_blur = False,
-    gblur_kernel_size = 5
+    gblur_kernel_size = 5,
+    gblur_sigma = 7,
+    # random crop
+    use_local_crop = False,
+    crop_scale_min = 0.6,
+    crop_scale_max = 1.0,
+    crop_ratio_min = 0.75,
+    crop_ratio_max = 1.33
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
@@ -180,9 +188,17 @@ def train(
 
     # Initialize gaussian blur object
     if use_gaussian_blur:
-        gaussian_blur = GaussianBlur(kernel_size=gblur_kernel_size)
+        gaussian_blur = GaussianBlur(kernel_size=gblur_kernel_size, sigma=gblur_sigma)
     else:
         gaussian_blur = None
+    
+    # Initialize local_crop
+    if use_local_crop:
+        local_crop = RandomResizedCrop(
+            size=(x_0.shape[1], x_0.shape[2]),
+            scale=(crop_scale_min, crop_scale_max),
+            ratio=(crop_ratio_min, crop_ratio_max)
+        )
 
     # Create mask
     if mask_type is not None and mask_size is not None:
@@ -218,9 +234,16 @@ def train(
         "epsilon": epsilon,
         "sigma": sigma,
         "start_from_white": start_from_white,
+        "target_text_random": target_text_random,
         # gaussian blur 
         "use_gaussian_blur": use_gaussian_blur,
         "gblur_kernel_size": gblur_kernel_size,
+        "gblur_sigma": gblur_sigma,
+        "use_local_crop": use_local_crop,
+        "crop_scale_min": crop_scale_min,
+        "crop_scale_max": crop_scale_max,
+        "crop_ratio_min": crop_ratio_min,
+        "crop_ratio_max": crop_ratio_max
     })
 
     min_losses = []
@@ -246,12 +269,13 @@ def train(
         target_text=target_text)
     
     refuse_flag = False
+
+    print("Starting training...")
     
     for iteration in tqdm(range(num_iterations)):
         if DPO_flag or target_text_random:
-            coin = random.random()
-            print("coin:", coin)
-            if DPO_flag and coin < refuse_prob:
+            if DPO_flag:
+                raise NotImplementedError("DPO flag is not implemented")
                 random_text = random.choice(inputs_processor.refuses)
                 refuse_flag = True
             elif target_text_random:
@@ -277,13 +301,16 @@ def train(
         ## Apply gaussian blur to trained x and save it later 
         if use_gaussian_blur:
             x = gaussian_blur(x)
-        pixel_values = adv_processor.process(x_0+x)["pixel_values"]
+        
+        # Add a dimension for batch processing for local_crop
+        if use_local_crop:
+            # Ensure x_0 + x has batch dimension for local_crop
+            combined = (x_0 + x).unsqueeze(0)
+            argument = local_crop(combined).squeeze(0)
+        else:
+            argument = x_0 + x
 
-        # ## Apply gaussian blur to pixel_values for training only 
-        # if use_gaussian_blur:
-        #     pixel_values = adv_processor.process(x_0+gaussian_blur(x))["pixel_values"]
-        # else: 
-        #     pixel_values = adv_processor.process(x_0+x)["pixel_values"]
+        pixel_values = adv_processor.process(argument)["pixel_values"]
         
         repeat_size = len(pixel_values.shape)*[1]
         repeat_size[0] = batch_size
@@ -464,31 +491,40 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
     parser.add_argument("--grad_accum_steps", type=int, default=1, help="Number of steps to accumulate gradients.")
     parser.add_argument("--scheduler_step_size", type=int, default=100, help="Step size for the learning rate scheduler.")
-    parser.add_argument("--scheduler_gamma", type=float, default=0.9, help="Gamma for the learning rate scheduler.")
-    parser.add_argument("--restart_num", type=int, default=0, help="Number of steps after which to restart the optimizer (0 means no restart).")  # Added argument
-    parser.add_argument("--mask_type", type=str, default=None, choices=['corner', 'bottom_lines', 'random_square'], help="Type of mask to apply.")  # Added argument
-    parser.add_argument("--mask_size", type=int, default=None, help="Size parameter for the mask (n for corner or random_square, k for bottom_lines).")  # Added argument
-    parser.add_argument("--clamp_method", type=str, default='clamp', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")  # Added argument
-    parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")  # Added argument
+    parser.add_argument("--scheduler_gamma", type=float, default=1.0, help="Gamma for the learning rate scheduler.")
+    parser.add_argument("--restart_num", type=int, default=0, help="Number of steps after which to restart the optimizer (0 means no restart).")
+    parser.add_argument("--mask_type", type=str, default=None, choices=['corner', 'bottom_lines', 'random_square'], help="Type of mask to apply.")
+    parser.add_argument("--mask_size", type=int, default=None, help="Size parameter for the mask (n for corner or random_square, k for bottom_lines).")
+    parser.add_argument("--clamp_method", type=str, default='tanh', choices=['clamp', 'tanh', 'none'], help="Method to enforce pixel value constraints.")
+    parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")
     parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
     parser.add_argument("--DPO_flag", action='store_true', help="DPO flag")
-    parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability using refusing answers. Is used, if DPO_flag is True.")
+    parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability using refusing answers. Is used, if DPO_flag is True (deprecated).")
     # epsilon from 4.2.3. IMPLEMENTATION DETAILS
-    parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon hparam for bounding g(z_1).")
+    parser.add_argument("--epsilon", type=float, default=0.5, help="Epsilon hparam for bounding g(z_1).")
     # sigma squared from 4.2.3. IMPLEMENTATION DETAILS
     parser.add_argument("--sigma", type=float, default=0.001, help="Sigma squared hparam for 'enhance robustness' or `resave_error_std` from code.")
     # gaussian blur
     parser.add_argument("--use_gaussian_blur", action='store_true', help="Use gaussian blur for optimized attack image.")
     parser.add_argument("--gblur_kernel_size", type=int, default=5, help="Kernel size for gaussian blur.")
+    parser.add_argument("--gblur_sigma", type=float, default=7, help="Sigma for gaussian blur.")
+    # Add random crop parameter
+    parser.add_argument("--use_local_crop", action='store_true', help="Use random resized crop for data augmentation.")
+    # Add random crop scale parameters
+    parser.add_argument("--crop_scale_min", type=float, default=0.6, help="Minimum scale factor for random crop.")
+    parser.add_argument("--crop_scale_max", type=float, default=1.0, help="Maximum scale factor for random crop.")
+    # Add random crop ratio parameters
+    parser.add_argument("--crop_ratio_min", type=float, default=0.75, help="Minimum aspect ratio for random crop.")
+    parser.add_argument("--crop_ratio_max", type=float, default=1.33, help="Maximum aspect ratio for random crop.")
+    
     
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique_exp_name = f"{args.exp_name}_{timestamp}"
 
-    print("params:", args)
-    print("use_gaussian_blur:", args.use_gaussian_blur, type(args.use_gaussian_blur))
-    print("gblur_kernel_size:", args.gblur_kernel_size, type(args.gblur_kernel_size))
+    print("params:", args.__dict__)
+    
     train(
         exp_name=unique_exp_name,
         img_orig=args.img_orig,
@@ -513,7 +549,13 @@ def main():
         DPO_flag = args.DPO_flag,
         refuse_prob = args.refuse_prob,
         use_gaussian_blur = args.use_gaussian_blur,
-        gblur_kernel_size = args.gblur_kernel_size
+        gblur_kernel_size = args.gblur_kernel_size,
+        gblur_sigma = args.gblur_sigma,
+        use_local_crop = args.use_local_crop,
+        crop_scale_min = args.crop_scale_min,
+        crop_scale_max = args.crop_scale_max,
+        crop_ratio_min = args.crop_ratio_min,
+        crop_ratio_max = args.crop_ratio_max
     )
 
 if __name__ == "__main__":
