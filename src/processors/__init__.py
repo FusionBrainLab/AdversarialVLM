@@ -32,8 +32,18 @@ MODEL_MAP = {
         "module": "processors.llama32processor",
         "input_class": "AdvMllamaInputs",
         "processor_class": "DifferentiableMllamaImageProcessor",
+    },
+    "llava-hf/llava-1.5-7b-hf": {
+        "module": "processors.llavaprocessor",
+        "input_class": "AdvLlavaInputs",
+        "processor_class": "DifferentiableLlavaImageProcessor",
+    },
+    # pqlet: google/gemma-3-12b-it. Only for evaluation.
+    "google/gemma-3-12b-it": {
+        "module": "processors.gemma3processor",
+        "input_class": "AdvGemma3Inputs",
+        "processor_class": None,
     }
-    
 }
 
 def load_components(model_name: str) -> Tuple[object, object, object]:
@@ -57,6 +67,10 @@ def load_components(model_name: str) -> Tuple[object, object, object]:
     # Получаем необходимые компоненты
     load_model_and_processor = getattr(module, "load_model_and_processor")
     AdvInputs = getattr(module, model_info["input_class"])
-    DifferentiableImageProcessor = getattr(module, model_info["processor_class"])
+    if model_info["processor_class"] is not None:
+        DifferentiableImageProcessor = getattr(module, model_info["processor_class"])
+    else:
+        # i.e. inference only 
+        DifferentiableImageProcessor = None
 
     return load_model_and_processor, AdvInputs, DifferentiableImageProcessor
