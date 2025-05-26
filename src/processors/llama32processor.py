@@ -63,6 +63,23 @@ def pad_to_max_num_crops_tensor(images, max_crops=5):
     return images
 
 class AdvMllamaInputs:
+    refuses = [
+        "I cannot provide",
+        "I can't help",
+        "I can't support",
+        "I can't provide",
+        "I can't prescribe",
+        "I can't advise",
+        "I can't accommodate",
+        "I can't diagnose",
+        "I can't engage",
+        "I can't fulfill",
+        "I can't recommend",
+        "I can't assist",
+        "I can't answer",
+        "Absolutely not."
+    ]
+    
     def __init__(self, questions, test_questions, batch_size, original_image, processor, device="cuda:0", target_text="sure, here it is!"):
         self.questions = questions
         self.test_questions = test_questions
@@ -88,7 +105,7 @@ class AdvMllamaInputs:
         self.suffix_length = self.target_tokens.shape[1]
         self.target = self.target_tokens[:, :-self.shift].repeat(self.batch_size, 1).to(self.device)
     
-    def set_target_text(self, target_text):
+    def set_target_text(self, target_text: str):
         self.target_text = target_text
         self.update_target_tokens()
 
@@ -128,9 +145,26 @@ class AdvMllamaInputs:
         ).to(torch.device(self.device))
         
         return inputs
-    
+        
+    def update_refuse_tokens(self):
+        self.refuse_tokens = self.processor.tokenizer(self.refuse_text+self.extra_token, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+        self.refuse_suffix_length = self.refuse_tokens.shape[1]
+        self.refuse = self.target_tokens[:, :-self.shift].repeat(self.batch_size, 1).to(self.device)
+
+    def set_refuse(self, refuse_text: str):
+        self.refuse_text = refuse_text
+        self.update_refuse_tokens()
+ 
+    def get_loss_refuse(self, logits):
+        # Extract relevant logits and compute loss
+        logits_suffix = logits[:, -self.refuse_suffix_length:-self.shift, :]
+        logits_suffix = logits_suffix.permute(0, 2, 1)
+        loss = F.cross_entropy(logits_suffix, self.refuse)
+        return loss
+
     def get_inputs_refuse(self):
         batch_questions = random.choices(self.questions, k=self.batch_size)
+        self.set_refuse(refuse = random.choice(self.refuses))
         
         prompts = [self.processor.apply_chat_template([
             {
@@ -145,7 +179,7 @@ class AdvMllamaInputs:
                 "role": "assistant",
                 "content": 
                     [
-                        {"type": "text", "text": "no, sorry"} # TODO : Update this
+                        {"type": "text", "text": self.refuse_text} # TODO : Update this
                     ]
             }
         ]) for q in batch_questions]
@@ -247,7 +281,7 @@ class DifferentiableMllamaImageProcessor():
     def resize_tensor(self, image: torch.Tensor) -> torch.Tensor:
         # C x H x W
         new_h, new_w, aspect_ratio = self._optimal_size(image)
-        image = F.interpolate((image).unsqueeze(0), size=[new_h, new_w], mode='bilinear', align_corners=False, antialias=True)
+        image = F.interpolate((image).unsqueeze(0), size=[int(new_h), int(new_w)], mode='bilinear', align_corners=False, antialias=True)
         image = image.squeeze(0)
         return image, aspect_ratio
     
@@ -417,42 +451,3 @@ class DifferentiableMllamaImageProcessor():
         img = (x * 255).cpu().detach().permute(1, 2, 0).numpy().astype(np.uint8)
         img = Image.fromarray(img)
         return img
-
-
-def batch_processing(processor, batch, images):
-    listof_inputs: list[BatchFeature] = []
-    for prompt, image in zip(batch, images):
-        if not isinstance(prompt, str):
-            prompt = processor.tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True
-            )
-        inputs = processor(prompt, [image], return_tensors="pt").to("cuda:0")
-        listof_inputs.append(inputs)
-
-    inputs = stack_and_pad_inputs(
-        listof_inputs, pad_token_id=processor.tokenizer.pad_token_id
-    )
-
-    return inputs
-
-
-def stack_and_pad_inputs(inputs: list[BatchFeature], pad_token_id: int) -> BatchFeature:
-    listof_input_ids = [i.input_ids[0] for i in inputs]
-    new_input_ids = pad_left(listof_input_ids, pad_token_id=pad_token_id)
-    data = dict(
-        pixel_values=torch.cat([i.pixel_values for i in inputs], dim=0),
-        image_sizes=torch.cat([i.image_sizes for i in inputs], dim=0),
-        input_ids=new_input_ids,
-        attention_mask=(new_input_ids != pad_token_id).long(),
-    )
-    new_inputs = BatchFeature(data).to("cuda")
-    return new_inputs
-
-
-def pad_left(seqs: list[torch.Tensor], pad_token_id: int) -> torch.Tensor:
-    """Example: pad_left([[1, 2], [3, 4, 5]], pad_token_id=0) -> [[0, 1, 2], [3, 4, 5]]"""
-    max_len = max(len(seq) for seq in seqs)
-    padded = torch.full((len(seqs), max_len), pad_token_id)
-    for i, seq in enumerate(seqs):
-        padded[i, -len(seq) :] = seq
-    return padded
