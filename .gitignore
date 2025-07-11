@@ -5,6 +5,12 @@ good_runs
 wandb
 *.ipynb_checkpoints*
 *__pycache__
+datasets
+tests
+logs
+notebooks
+notebooks_
+jobs_*
 
 *dev*
 testing*
