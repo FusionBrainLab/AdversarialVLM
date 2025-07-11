@@ -270,7 +270,6 @@ def train(
         "mask_type": mask_type,
         "mask_size": mask_size,
         "clamp_method": clamp_method,
-        "epsilon": epsilon,
         "sigma": sigma,
         "start_from_white": start_from_white,
         "DPO_flag": DPO_flag,
@@ -551,7 +550,7 @@ def main():
     parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
     parser.add_argument("--DPO_flag", action='store_true', help="DPO flag")
     parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability of using refusing answers. Used if DPO_flag is True.")
-    parser.add_argument("--epsilon", type=float, default=0.4, help="Decrease to make attack more imperceptable. Values from 0 (no attack) to 0.5-0.6 (may lead to increased img resaving loss).")
+    parser.add_argument("--epsilon", type=float, default=0.4, help="Attack norm. Decrease to make attack more imperceptable. Values from 0 (no attack) to 0.5-0.6 (may lead to increased img resaving loss).")
     # sigma squared from 4.2.3. IMPLEMENTATION DETAILS
     parser.add_argument("--sigma", type=float, default=0.001, help="Sigma squared hparam for 'enhance robustness' or `resave_error_std` from code.")
     # gaussian blur

@@ -12,6 +12,7 @@ import os
 import argparse
 import wandb  # Import WandB
 import random  # Added import for random sampling
+import json
 
 from processors import load_components
 from train_test import run_model_test
@@ -524,7 +525,12 @@ def main():
     unique_exp_name = f"{args.exp_name}_{timestamp}"
 
     print("params:", args.__dict__)
-    
+    exp_path = create_directory(unique_exp_name)    
+    # Save args to config file to save exp hparams
+    config_path = os.path.join(exp_path, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(args.__dict__, f, indent=4)
+
     train(
         exp_name=unique_exp_name,
         img_orig=args.img_orig,
