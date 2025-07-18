@@ -1,0 +1,17 @@
+container:
+  image: "cr.ai.cloud.ru/aicloud-base-images/cuda12.1-torch2-py310:0.0.36"
+  command: "bash attack_clamp_tanh_llama-ma.sh"
+  environment:
+    HF_HOME: "/workspace-SR004.nfs2/.cache/huggingface"
+  work_dir: '.'
+  # run_from_copy: True # Рекомендуется запускать задачи именно из копий, чтобы избежать неожиданного поведения при запуске задач
+  # cry_copy_dir: "/workspace-SR004.nfs2/.cryri"
+
+cloud:
+  region: "SR004"
+  instance_type: "a100.1gpu"
+  n_workers: 1
+  priority: "medium"
+  description: "Adversarial attack llama-MA #rnd #multimodality #rahmatullaev #1gpu #adversarialattack"
+
+# cryri --region SR004 --logs NAME_OF_JOB
