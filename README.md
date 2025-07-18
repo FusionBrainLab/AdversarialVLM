@@ -15,9 +15,17 @@ The framework achieves **up to 81% attack success rates** on certain models, out
 
 **Key Research Contributions:**
 - **Universal Image Attacks**: Single adversarial image effective across multiple models and queries
-- **Cross-Model Transferability**: Attacks trained on one model transfer to others
-- **Benchmark Evaluation**: Comprehensive testing on SafeBench and MM-SafetyBench
-- **Multi-Answer Variants**: More natural-sounding malicious responses
+- **Optimization pipeline**: Various models could be attacked through both vision and language components
+- **Benchmark Evaluation**: Comprehensive competing methods reproducing on SafeBench and MM-SafetyBench
+- **Ablation Variants**: Multi-Answer supervision, Gaussian blurring, and localized perturbations
+- **Transferability resistance**: Using unique image processing pipelines drastically reduces the transerability of attacks 
+
+<p align="center">
+  <img src="assets/attack_example.png" alt="Universal Adversarial Attack Example" width="600"/>
+  <br>
+  <em>Figure: An example of a single universal adversarial image producing disallowed content. This image was originally optimized on three models (Phi, Qwen, and Llama) but is here tested on the Llava 1.5 7B demonstrating cross-model generalization. Despite safety alignment, the model yields an unsafe response for a harmful prompt.</em>
+</p>
+
 
 ## 🚀 Quick Start
 
@@ -54,54 +62,6 @@ echo "your_wandb_key" > wandb_key.txt
 ./scripts/evaluation/guard_eval.sh /path/to/results cuda_num
 ```
 
-## 🏗️ Project Structure
-
-```
-MLLM-adversarial/
-├── src/                              # Core source code
-│   ├── attack_model.py               # Single model attack implementation
-│   ├── crossattack_models.py         # Universal cross-model attacks
-│   ├── questions.py                  # Question sets for attacks
-│   ├── answers.py                    # Target harmful responses
-│   ├── processors/                   # Model-specific processors
-│   │   ├── abstract_processor.py     # Base processor class
-│   │   ├── phi3processor.py          # Phi-3.5 vision processor
-│   │   ├── qwen2VLprocessor.py       # Qwen2-VL processor
-│   │   ├── llama32processor.py       # Llama-3.2 vision processor
-│   │   ├── llavaprocessor.py         # LLaVA processor
-│   │   └── gemma3processor.py        # Gemma-3 judge processor
-│   ├── judge/                        # Safety evaluation module
-│   │   ├── safety_checker.py         # Gemma-3 safety judge
-│   │   ├── system_prompts.txt        # Judge system prompts
-│   │   └── README.md                 # Judge documentation
-│   └── evaluation/                   # Evaluation and testing tools
-│       ├── experiment_tracker.py     # Experiment analysis
-│       ├── find_best_iter_gemma.py   # Best iteration finder
-│       ├── SafeBench_universal.py    # SafeBench testing
-│       ├── MM_SafetyBench_baseline.py # MM-SafetyBench evaluation
-│       ├── FigStep_baseline.py       # FigStep testing
-│       ├── guard_eval_gemma.py       # Safety evaluation
-│       └── README.md                 # Evaluation documentation
-├── scripts/                          # Automation scripts
-│   ├── attacks/                      # Attack launch scripts
-│   │   ├── attack_cross.sh           # Cross-model attacks
-│   │   ├── attack_cross_gblur.sh     # Attacks with Gaussian blur
-│   │   ├── attack_cross_localization.sh # Localized attacks
-│   │   └── attack_clamp_tanh_*.sh    # Single model attacks
-│   └── evaluation/                   # Evaluation scripts
-│       ├── find_best_iter.sh         # Best iteration finder
-│       ├── safebench_test.sh         # SafeBench testing
-│       ├── guard_eval.sh             # Safety evaluation
-│       └── baseline_tests.sh         # Baseline benchmarks
-├── datasets/                         # Evaluation datasets
-│   ├── SafeBench_text_subset/        # SafeBench dataset
-│   ├── MM_SafetyBench/               # MM-SafetyBench dataset
-│   └── FigStep/                      # FigStep dataset
-├── runs/                             # Training results
-├── tests/                            # Evaluation results
-└── images/                           # Source images
-```
-
 ## 🔧 Core Components
 
 ### Adversarial Attack Framework
@@ -118,6 +78,21 @@ The framework features a sophisticated processor system with specialized handler
 - **Llama-3.2** (`llama32processor.py`) - Adaptive tiling with optimal canvas allocation
 - **LLaVA** (`llavaprocessor.py`) - Simple fixed-size scaling
 - **Gemma-3** (`gemma3processor.py`) - Safety judge for evaluation only
+
+> **Extending the Pipeline to New Models**
+
+To attack a different model, you can leverage the existing pipeline by writing a differentiable Image Processor for your target model. You can use the provided examples (`phi3processor.py`, `qwen2VLprocessor.py`, `llama32processor.py`, `llavaprocessor.py`) and the `abstract_processor.py` as a reference.
+
+**Steps to add support for a new model:**
+1. Write a differentiable Image Processor for your model, using `abstract_processor.py` as an example.
+2. Implement the image preprocessing methods, ensuring they are differentiable (support autograd).
+3. Register your processor in the main attack pipeline (`./src/processors/__init__.py`).
+4. If needed, adapt the attack launch scripts for your new model (`./scripts/attacks/`).
+
+This approach allows you to utilize all features of the framework (localization, universal attacks, benchmarking) with any compatible model.
+
+
+
 
 ### Safety Evaluation System
 
@@ -159,16 +134,6 @@ The framework features a sophisticated processor system with specialized handler
 3. **Benchmark Testing** - Evaluate attacks on SafeBench, MM-SafetyBench, and FigStep datasets
 4. **Safety Assessment** - Quantitative evaluation using Attack Success Rate (ASR) metrics
 
-## 🛠️ Supported Models
-
-### Target Models (Attack Victims)
-- **Microsoft Phi-3.5-vision-instruct** - Advanced vision-language model
-- **Qwen/Qwen2-VL-*B-Instruct** - Alibaba's multimodal model family
-- **meta-llama/Llama-3.2-11B-Vision-Instruct** - Meta's vision-enabled Llama
-- **llava-hf/llava-1.5-7b-hf** - Popular open-source multimodal model
-
-### Judge Model
-- **google/gemma-3-4b-it** - Safety evaluation and content filtering
 
 ## 📈 Experiment Analysis
 
@@ -241,20 +206,6 @@ python src/evaluation/SafeBench_universal.py \
 - **MM-SafetyBench** - Extended multimodal safety dataset
 - **FigStep** - Image understanding and reasoning dataset
 
-## 🧪 Advanced Features
-
-### Optimizer Restart
-- Periodic optimizer reinitialization for improved convergence
-- Configurable restart intervals
-
-### Batch Processing
-- Mixed prompt batching for efficient training
-- Randomized question sampling within batches
-
-### Multi-GPU Support
-- Distributed training across multiple GPUs
-- Model parallelism for large-scale experiments
-
 ## 📚 More Documentation
 
 - **[src/evaluation/README.md](src/evaluation/README.md)** - Evaluation framework documentation
@@ -276,10 +227,3 @@ This framework is designed exclusively for AI safety research purposes. The goal
 ## 📄 License
 
 This project is intended for academic research purposes. Please contact the authors for usage details.
-
-## 🙏 Acknowledgments
-
-- Hugging Face team for providing model infrastructure
-- SafeBench, MM-SafetyBench, and FigStep dataset creators
-- AI safety research community for foundational work
-- Open-source contributors to the multimodal AI ecosystem 
