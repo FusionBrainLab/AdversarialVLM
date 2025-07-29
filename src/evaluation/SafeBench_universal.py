@@ -2,8 +2,10 @@ import os
 import sys
 import argparse
 
-project_root = os.path.abspath("/home/jovyan/rahmatullaev/adversarial/src")
-sys.path.append(project_root)
+# Получаем абсолютный путь к корню проекта
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+src_path = os.path.join(project_root, "src")
+sys.path.append(src_path)
 
 from datetime import datetime
 import torch
@@ -12,8 +14,8 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
-from src.processors import load_components
-from src.processors.phi3processor import batch_processing
+from processors import load_components
+from processors.phi3processor import batch_processing
 
 sfb_path = "/home/jovyan/rahmatullaev/adversarial/SafeBench_Text/"
 dict_suf_modelname = {
@@ -82,7 +84,20 @@ def main(exp, model_suf, device):
                             padding=True
                         ).to(device)
 
-                outputs = model.generate(**inputs, max_new_tokens=128, do_sample=False, min_new_tokens=32)
+                # Добавляем pad_token_id если не установлен
+                if processor.tokenizer.pad_token_id is None:
+                    pad_token_id = processor.tokenizer.eos_token_id
+                else:
+                    pad_token_id = processor.tokenizer.pad_token_id
+                    
+                outputs = model.generate(
+                    **inputs, 
+                    max_new_tokens=128, 
+                    do_sample=False, 
+                    min_new_tokens=32, 
+                    use_cache=False,
+                    pad_token_id=pad_token_id
+                )
                 for idx, output in enumerate(outputs):
                     ans = processor.decode(output[inputs["input_ids"].shape[1]:],  skip_special_tokens=True)
                     generated_texts.append(ans)
