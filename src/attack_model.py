@@ -1,4 +1,5 @@
-import sys 
+import sys
+from typing import Optional, Union 
 sys.path = [p for p in sys.path if p != '/home/jovyan/.imgenv-razzhigaev-small-1-0/lib/python3.7/site-packages'] 
 
 from datetime import datetime
@@ -10,15 +11,115 @@ from tqdm import tqdm
 # from transformers import AutoProcessor, AutoModelForCausalLM
 import os
 import argparse
-import wandb  # Import WandB
+from torch.utils.tensorboard import SummaryWriter  # Import TensorBoard
 import random  # Added import for random sampling
 import json
+
+# Conditional import for Aim
+try:
+    from aim import Run
+    try:
+        from aim import Image as AimImage
+        AIM_IMAGE_AVAILABLE = True
+    except ImportError:
+        AIM_IMAGE_AVAILABLE = False
+        AimImage = None
+    AIM_AVAILABLE = True
+except ImportError:
+    AIM_AVAILABLE = False
+    AIM_IMAGE_AVAILABLE = False
+    print("Warning: Aim not installed. Install with: pip install aim")
+    Run = None
+    AimImage = None
 
 from processors import load_components
 from train_test import run_model_test
 
 from torchvision.transforms import RandomResizedCrop
 from torchvision.transforms import GaussianBlur # Additional regularization for noise
+
+class ExperimentLogger:
+    """Universal wrapper for both Aim and TensorBoard logging."""
+    
+    def __init__(self, exp_name: str, config: dict, use_tensorboard: bool = False, track_artifacts: bool = False):
+        self.exp_name = exp_name
+        self.config = config
+        self.use_tensorboard = use_tensorboard
+        self.track_artifacts = track_artifacts
+        
+        if use_tensorboard:
+            # Initialize TensorBoard
+            self.writer = SummaryWriter(log_dir=os.path.join("./runs", exp_name))
+            self.aim_run = None
+            print(f"Using TensorBoard for experiment: {exp_name}")
+        else:
+            # Initialize Aim (default)
+            if not AIM_AVAILABLE:
+                raise ImportError("Aim is not available. Install with 'pip install aim' or use --use_tensorboard flag")
+            
+            self.aim_run = Run(
+                repo='./aim_repo',  # Local Aim repository
+                experiment=exp_name
+            )
+            # Log config parameters
+            for key, value in config.items():
+                self.aim_run[key] = value
+            
+            self.writer = None
+            print(f"Using Aim for experiment: {exp_name}")
+        
+        print(f"Artifact tracking (images/tensors): {'enabled' if track_artifacts else 'disabled'}")
+    
+    def add_scalar(self, name: str, value: float, step: int):
+        """Log scalar metric."""
+        if self.use_tensorboard and self.writer:
+            self.writer.add_scalar(name, value, step)
+        elif self.aim_run:
+            self.aim_run.track(value, name=name, step=step)
+    
+    def add_image(self, name: str, img_tensor: torch.Tensor, step: int):
+        """Log image (only if artifacts tracking is enabled)."""
+        if not self.track_artifacts:
+            return  # Skip image logging if artifacts tracking is disabled
+            
+        if self.use_tensorboard and self.writer:
+            self.writer.add_image(name, img_tensor, step)
+        elif self.aim_run:
+            try:
+                # Convert tensor to numpy array for Aim
+                if len(img_tensor.shape) == 4:  # Batch dimension
+                    img_tensor = img_tensor[0]
+                
+                # Ensure tensor is in [0,1] range and convert to numpy
+                if img_tensor.max() > 1.0:
+                    img_tensor = img_tensor / 255.0
+                
+                # Convert to numpy array (HWC format for Aim)
+                if img_tensor.shape[0] == 3:  # CHW -> HWC
+                    img_array = img_tensor.permute(1, 2, 0).cpu().detach().numpy()
+                else:
+                    img_array = img_tensor.cpu().detach().numpy()
+                
+                # Ensure values are in [0,1] range
+                img_array = np.clip(img_array, 0, 1)
+                
+                # Track as numpy array (Aim can handle this)
+                if AIM_IMAGE_AVAILABLE:
+                    aim_image = AimImage(img_array)
+                    self.aim_run.track(aim_image, name=name, step=step)
+                else:
+                    # Fallback: try to track as raw numpy array
+                    self.aim_run.track(img_array, name=name, step=step)
+                
+            except Exception as e:
+                print(f"Warning: Failed to log image {name} to Aim: {e}")
+    
+    def close(self):
+        """Close logger."""
+        if self.use_tensorboard and self.writer:
+            self.writer.close()
+        elif self.aim_run:
+            self.aim_run.close()
 
 def setup_device():
     """Setup computing device."""
@@ -35,33 +136,34 @@ def save_checkpoint(image: Image.Image, tensor: torch.Tensor, path: str, iterati
     image.save(os.path.join(path, f"optimized_image_iter_{iteration}.png"))
     tensor.cpu().detach().numpy().astype(np.float32).tofile(os.path.join(path, f"optimized_image_iter_{iteration}.bin"))
 
-def initialize_wandb(exp_name, config):
-    """Initialize WandB for experiment tracking."""
-    wandb.init(
-        project="image_attack_optimization",
-        name=exp_name,
-        config=config,  # Logging configuration
-        tags=["image-attack", "training", "transformers"],
-        mode="online"
-    )
+def initialize_experiment_logger(exp_name, config, use_tensorboard=False, track_artifacts=False):
+    """Initialize experiment logger (Aim by default, TensorBoard if specified)."""
+    return ExperimentLogger(exp_name, config, use_tensorboard, track_artifacts)
 
-def log_metrics_wandb(
+def log_metrics(
+        logger: ExperimentLogger,
         iteration: int,
         loss: torch.Tensor,
-        final_image: np.array,
+        final_image: Image.Image,
         final_tensor: torch.Tensor,
-        generated_table: wandb.Table,
-        save_steps: int
+        save_steps: int,
+        additional_log: Optional[dict] = None
     ):
-    """Logs metrics and images to WandB."""
+    """Logs metrics and images to the experiment logger."""
 
     if iteration % save_steps == 0:  # Log images and model output every `save_steps` iterations
-        wandb.log({"optimized_image": [wandb.Image(final_image, caption=f"Iteration {iteration}")]})
-        # Log the generated text to WandB
-        wandb.log({"generated_text": generated_table})
-        wandb.log({"iteration": iteration})
+        # Convert PIL image to tensor for logging
+        import torchvision.transforms as transforms
+        to_tensor = transforms.ToTensor()
+        img_tensor = to_tensor(final_image)
+        logger.add_image(f"optimized_image_iter_{iteration}", img_tensor, iteration)
         # log x+x_0
-        wandb.log({"optimized_tensor": [wandb.Image(final_tensor, caption=f"Iteration {iteration}")]})
+        logger.add_image(f"optimized_tensor_iter_{iteration}", final_tensor, iteration)
+    
+    if additional_log is not None:
+        for key, value in additional_log.items():
+            logger.add_scalar(key, value, iteration)
+        logger.add_scalar("loss", loss.item(), iteration)
 
 def create_mask(mask_type, mask_size, image_shape, device):
     """Creates a mask tensor based on the specified mask_type and mask_size."""
@@ -127,6 +229,8 @@ def train(
     start_from_white,      # Added for starting from white image
     target_text_random,
     DPO_flag = False,
+    DPO_beta = 0.3,       # BDPO temperature parameter
+    DPO_lambda = 1.0,     # BDPO mixture parameter (default 1.0 = standard DPO)
     refuse_prob = 0.1, # deprecated
     # gaussian blur
     use_gaussian_blur = False,
@@ -137,7 +241,10 @@ def train(
     crop_scale_min = 0.6,
     crop_scale_max = 1.0,
     crop_ratio_min = 0.75,
-    crop_ratio_max = 1.33
+    crop_ratio_max = 1.33,
+    anymodel_mode = False,
+    use_tensorboard = False,  # New parameter for logger selection
+    track_artifacts = False   # New parameter for artifact logging
     ):
     """Train the model on the given image with specific settings."""
     from questions import questions, not_safe_questions, not_safe_questions_test
@@ -155,8 +262,18 @@ def train(
     exp_path = create_directory(exp_name)
 
     # Load model and processor
-    load_model_and_processor, AdvInputs, DifferentiableImageProcessor = load_components(model_name)
+    load_model_and_processor, AdvInputs, DifferentiableImageProcessor = load_components(model_name, any_support=anymodel_mode)
     model, processor = load_model_and_processor(model_name, device)
+    
+    # ВАЖНО: Отключаем градиенты для параметров модели для экономии памяти
+    # Градиенты нужны только для тензора изображения, не для параметров модели
+    model.eval()  # Перевести в режим оценки
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    # Проверяем, что градиенты все еще могут проходить через модель
+    print("Model parameters requires_grad:", any(p.requires_grad for p in model.parameters()))
+    
     adv_processor = DifferentiableImageProcessor(processor.image_processor, device)
 
     # Preprocess images and prepare tensors
@@ -207,7 +324,7 @@ def train(
     else:
         mask = (x_0 != 0).int()
         # mask = torch.ones_like(x_0).to(device)
-
+    
     # save mask
     torch.save(mask, os.path.join(exp_path, 'mask.pt'))
     Image.fromarray((mask.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)).save(os.path.join(exp_path, 'mask.png'))
@@ -215,19 +332,19 @@ def train(
     # Set up a learning rate scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step_size, gamma=scheduler_gamma)
 
-    # Initialize WandB
-    initialize_wandb(exp_name, {
+    # Initialize experiment logger (Aim by default, TensorBoard if specified)
+    logger = initialize_experiment_logger(exp_name, {
         "learning_rate": lr,
         "batch_size": batch_size,
         "num_iterations": num_iterations,
         "grad_accum_steps": grad_accum_steps,
         "scheduler_step_size": scheduler_step_size,
         "scheduler_gamma": scheduler_gamma,
-        "original_mean": x_0.mean(),
-        "original_std": x_0.std(),
+        "original_mean": float(x_0.mean()),
+        "original_std": float(x_0.std()),
         "target_text": target_text,
         "full_prompt": prompt,
-        "questions amount": len(questions),
+        "questions_amount": len(questions),
         "restart_num": restart_num,
         "mask_type": mask_type,
         "mask_size": mask_size,
@@ -236,6 +353,10 @@ def train(
         "sigma": sigma,
         "start_from_white": start_from_white,
         "target_text_random": target_text_random,
+        # BDPO settings
+        "DPO_flag": DPO_flag,
+        "DPO_beta": DPO_beta,
+        "DPO_lambda": DPO_lambda,
         # gaussian blur 
         "use_gaussian_blur": use_gaussian_blur,
         "gblur_kernel_size": gblur_kernel_size,
@@ -244,14 +365,14 @@ def train(
         "crop_scale_min": crop_scale_min,
         "crop_scale_max": crop_scale_max,
         "crop_ratio_min": crop_ratio_min,
-        "crop_ratio_max": crop_ratio_max
-    })
+        "crop_ratio_max": crop_ratio_max,
+        "use_tensorboard": use_tensorboard,
+        "track_artifacts": track_artifacts
+    }, use_tensorboard, track_artifacts)
 
     min_losses = []
 
-    # Создаём таблицу для логгирования выводов моделей
-    model_outputs_table = wandb.Table(columns=["iteration"] + [model_name])
-
+    # Experiment logger is already initialized above
 
     # Gradient accumulation variables
     global_iteration = 0
@@ -270,23 +391,19 @@ def train(
         target_text=target_text)
     
     refuse_flag = False
+    
+    x_0.requires_grad = True
 
     print("Starting training...")
     
     for iteration in tqdm(range(num_iterations)):
-        if DPO_flag or target_text_random:
-            if DPO_flag:
-                raise NotImplementedError("DPO flag is not implemented")
-                random_text = random.choice(inputs_processor.refuses)
-                refuse_flag = True
-            elif target_text_random:
-                random_text = random.choice(inputs_processor.target_texts)
-                refuse_flag = False
-            else:
-                random_text = target_text
-                refuse_flag = False
-
-            print(f"{refuse_flag} text:", random_text)
+        if target_text_random:
+            random_text = random.choice(inputs_processor.target_texts)
+            inputs_processor.set_target_text(random_text)
+            refuse_flag = False
+        else:
+            random_text = target_text
+            refuse_flag = False
             inputs_processor.set_target_text(random_text)
         
         inputs = inputs_processor.get_inputs_train()
@@ -318,14 +435,20 @@ def train(
         pixel_values = pixel_values.repeat(repeat_size)
 
         noise = torch.randn_like(pixel_values).to(device) * resave_error_std
-        inputs['pixel_values'] = pixel_values + noise
+        noisy_pixel_values = pixel_values + noise
+        
+        if DPO_flag:
+            # Use DPO loss: adversarial vs original image
+            ref_pixel_values = adv_processor.process(x_0)["pixel_values"].repeat(repeat_size)
+            loss = inputs_processor.compute_dpo_loss(model, noisy_pixel_values, ref_pixel_values, beta=DPO_beta, lambda_=DPO_lambda)
+        else:
+            # Standard training
+            inputs['pixel_values'] = noisy_pixel_values
+            # Forward pass and compute logits
+            outputs = model(**inputs)
+            logits = outputs.logits[:, :-1, :]
+            loss = inputs_processor.get_loss(logits)
 
-        # Forward pass and compute logits
-        outputs = model(**inputs)
-        logits = outputs.logits[:, :-1, :]
-
-        loss = inputs_processor.get_loss(logits)
-        loss = -loss if refuse_flag else loss
         img_loss = image_fit_loss(x_0, x, 0, 1)
         loss = (loss + img_loss) / grad_accum_steps  # Normalize loss to accumulate gradients
         accumulated_loss += loss.item()
@@ -338,6 +461,17 @@ def train(
             x.grad = x.grad * mask
         
         grad_norm = p.grad.norm() if clamp_method == 'tanh' else x.grad.norm()
+        
+        # Проверка градиентов на первой итерации
+        if iteration == 0:
+            if clamp_method == 'tanh':
+                print(f"Gradients working! p.grad norm: {grad_norm.item():.6f}")
+                print(f"p.grad is not None: {p.grad is not None}")
+                print(f"p.requires_grad: {p.requires_grad}")
+            else:
+                print(f"Gradients working! x.grad norm: {grad_norm.item():.6f}")
+                print(f"x.grad is not None: {x.grad is not None}")
+                print(f"x.requires_grad: {x.requires_grad}")
 
         # Gradient accumulation and optimizer step
         if (iteration + 1) % grad_accum_steps == 0:
@@ -347,9 +481,7 @@ def train(
             
             # Optional: Print/log the accumulated loss and gradient norm
             # print(f"Step {global_iteration}, Accumulated Loss: {accumulated_loss}, Grad Norm: {grad_norm.item()}")
-            wandb.log({
-                "accumulated_loss": accumulated_loss,
-            })
+            logger.add_scalar("accumulated_loss", accumulated_loss, global_iteration)
             accumulated_loss = 0  # Reset accumulated loss for the next round
             global_iteration += 1
 
@@ -379,33 +511,21 @@ def train(
             resaved_loss = inputs_processor.get_loss(logits)
 
         # Log metrics
-        wandb_log_data = {
-            "image_loss": img_loss.item(),
-            "loss_resaved": resaved_loss.item(),
-            "iteration": iteration, 
-            "adversarial_mean": x.mean(),
-            "adversarial_std": x.std(),
-            "lr": scheduler.get_last_lr()[0],
-            "resave_error_mean": (x_mod_resaved - (x + x_0)).abs().mean(),
-            "resave_error_std": resave_error_std,
-            "resave_error_l1": (x_mod_resaved - x_mod).abs().sum(),
-            "noise_mean": noise.mean(),
-            "noise_std": noise.std(),
-            "global_iteration": global_iteration,
-            "sigma": sigma,
-            "adversarial_mean": x.mean(),
-            "adversarial_std": x.std(),
-            "lr": scheduler.get_last_lr()[0],
-            "grad norm": grad_norm
-        }
+        logger.add_scalar("image_loss", img_loss.item(), global_iteration)
+        logger.add_scalar("loss_resaved", resaved_loss.item(), global_iteration)
+        logger.add_scalar("adversarial_mean", float(x.mean()), global_iteration)
+        logger.add_scalar("adversarial_std", float(x.std()), global_iteration)
+        logger.add_scalar("lr", scheduler.get_last_lr()[0], global_iteration)
+        logger.add_scalar("resave_error_mean", float((x_mod_resaved - (x + x_0)).abs().mean()), global_iteration)
+        logger.add_scalar("resave_error_std", float(resave_error_std), global_iteration)
+        logger.add_scalar("resave_error_l1", float((x_mod_resaved - x_mod).abs().sum()), global_iteration)
+        logger.add_scalar("noise_mean", float(noise.mean()), global_iteration)
+        logger.add_scalar("noise_std", float(noise.std()), global_iteration)
+        logger.add_scalar("global_iteration", global_iteration, global_iteration)
+        logger.add_scalar("sigma", sigma, global_iteration)
+        logger.add_scalar("grad_norm", float(grad_norm), global_iteration)
+        logger.add_scalar("loss", loss.item(), global_iteration)
         
-        if refuse_flag:
-            wandb_log_data["loss_refuse"] = loss.item()
-        else:
-            wandb_log_data["loss"] = loss.item()
-        
-        wandb.log(wandb_log_data)
-
         # Every `save_steps`, run inference and log results
         if iteration % save_steps == 0 or iteration == num_iterations - 1:
             # Generate output for the current attacked image using only the prompt
@@ -419,20 +539,7 @@ def train(
             img = Image.open(img_path).convert("RGB")
             # x_mod_resaved = torch.tensor(np.array(img).astype(np.float32)/255).permute(2, 0, 1).to(device)
             
-            """
-            inputs_for_inference = inputs_processor.get_inputs_inference(img)
-            
-            outputs_inference = model.generate(**inputs_for_inference, max_new_tokens=64, do_sample=False)
-            # Decode the generated output from the model
-            generated_text = processor.tokenizer.decode(outputs_inference[outputs_inference != -1], skip_special_tokens=False)
-            print("generated_text:", generated_text)
-            generated_table_list.append([generated_text])
-            generated_table = wandb.Table(data=generated_table_list, columns=["Generated Text"])
-            """
-            
-            iteration_outputs = [iteration]  # Первая колонка — номер итерации
-    
-            models_output, wandb_log = run_model_test(
+            models_output, additional_log = run_model_test(
                 models=[model],
                 processors=[processor],
                 inputs_processors=[inputs_processor],
@@ -444,17 +551,10 @@ def train(
                 img=img
             )
             
-            wandb.log(wandb_log)
-
-            # Добавляем строку в таблицу
-            iteration_outputs = iteration_outputs + models_output[1:]
-            
             print("Question:", models_output[0])
             print(f"Model {model_name} output:", models_output[1])
             
-            model_outputs_table.add_data(*iteration_outputs)
-            
-            log_metrics_wandb(iteration, loss, final_image, (x + x_0), model_outputs_table, save_steps)
+            log_metrics(logger, iteration, loss, final_image, (x + x_0), save_steps, additional_log)
 
         # Clip everything
         if restart_num > 0 and (iteration + 1) % restart_num == 0:
@@ -462,10 +562,8 @@ def train(
                 # x.clamp_(min=-0.1, max=0.1)
                 y = (x + x_0).clamp(0.0, 1.0).mul(255).to(torch.uint8)
                 x_new = y - x_0
-                wandb.log({
-                    "fix_error_mean": (x_new - x).abs().mean(),
-                    "fix_error_std": (x_new - x).abs().std()
-                })
+                logger.add_scalar("fix_error_mean", float((x_new - x).abs().mean()), global_iteration)
+                logger.add_scalar("fix_error_std", float((x_new - x).abs().std()), global_iteration)
                 x = x_new.clone()
         
         # Logging
@@ -476,8 +574,8 @@ def train(
     final_image = adv_processor.tensor2pil(x_mod)
     save_checkpoint(final_image, x + x_0, exp_path, "final")
 
-    # Finish WandB run
-    wandb.finish()
+    # Finish experiment logging
+    logger.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Train image attack model.")
@@ -500,6 +598,8 @@ def main():
     parser.add_argument("--start_from_white", action='store_true', help="Start attack from a white image instead of the original image.")
     parser.add_argument("--target_text_random", action='store_true', help="Randomly select target_text from the answers list.")
     parser.add_argument("--DPO_flag", action='store_true', help="DPO flag")
+    parser.add_argument("--DPO_beta", type=float, default=0.3, help="BDPO temperature parameter (typically 0.1-0.5)")
+    parser.add_argument("--DPO_lambda", type=float, default=1.0, help="BDPO mixture parameter (default 1.0 = standard DPO)")
     parser.add_argument("--refuse_prob", type=float, default=0.0, help="Probability using refusing answers. Is used, if DPO_flag is True (deprecated).")
     # epsilon from 4.2.3. IMPLEMENTATION DETAILS
     parser.add_argument("--epsilon", type=float, default=0.5, help="Epsilon hparam for bounding g(z_1).")
@@ -517,7 +617,9 @@ def main():
     # Add random crop ratio parameters
     parser.add_argument("--crop_ratio_min", type=float, default=0.75, help="Minimum aspect ratio for random crop.")
     parser.add_argument("--crop_ratio_max", type=float, default=1.33, help="Maximum aspect ratio for random crop.")
-    
+    parser.add_argument("--anymodel_mode", action='store_true', help="Use anymodel differentiable processor.")
+    parser.add_argument("--use_tensorboard", action='store_true', help="Use TensorBoard instead of Aim for experiment logging.")
+    parser.add_argument("--track_artifacts", action='store_true', help="Enable tracking of artifacts (images and tensors) in experiment logger.")
     
     args = parser.parse_args()
 
@@ -526,6 +628,7 @@ def main():
 
     print("params:", args.__dict__)
     exp_path = create_directory(unique_exp_name)    
+    print("experiment path:", exp_path)
     # Save args to config file to save exp hparams
     config_path = os.path.join(exp_path, 'config.json')
     with open(config_path, 'w') as f:
@@ -553,6 +656,8 @@ def main():
         start_from_white=args.start_from_white,
         target_text_random=args.target_text_random,
         DPO_flag = args.DPO_flag,
+        DPO_beta = args.DPO_beta,
+        DPO_lambda = args.DPO_lambda,
         refuse_prob = args.refuse_prob,
         use_gaussian_blur = args.use_gaussian_blur,
         gblur_kernel_size = args.gblur_kernel_size,
@@ -561,7 +666,10 @@ def main():
         crop_scale_min = args.crop_scale_min,
         crop_scale_max = args.crop_scale_max,
         crop_ratio_min = args.crop_ratio_min,
-        crop_ratio_max = args.crop_ratio_max
+        crop_ratio_max = args.crop_ratio_max,
+        anymodel_mode = args.anymodel_mode,
+        use_tensorboard = args.use_tensorboard,
+        track_artifacts = args.track_artifacts
     )
 
 if __name__ == "__main__":
