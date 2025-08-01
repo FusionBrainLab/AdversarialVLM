@@ -175,10 +175,10 @@ class AdvPhiInputs:
         inputs_neg = self.get_inputs_refuse()
         
         # Add adversarial pixel values for policy
-        repeat_size = len(adv_pixel_values.shape)*[1]
-        repeat_size[0] = self.batch_size
-        adv_pixel_values_repeated = adv_pixel_values.repeat(repeat_size)
-        ref_pixel_values_repeated = ref_pixel_values.repeat(repeat_size)
+        # repeat_size = len(adv_pixel_values.shape)*[1]
+        # repeat_size[0] = self.batch_size
+        adv_pixel_values_repeated = adv_pixel_values# .repeat(repeat_size)
+        ref_pixel_values_repeated = ref_pixel_values# .repeat(repeat_size)
         
         inputs_pos['pixel_values'] = adv_pixel_values_repeated
         inputs_neg['pixel_values'] = adv_pixel_values_repeated
@@ -243,11 +243,13 @@ class AdvPhiInputs:
         # ---------------------- BDPO objective ----------------------
         # Вычисление log-mixture для отрицательных
         #   log π_mix(y_l) = log(λ·exp(log_pi_neg) + (1-λ)·exp(log_ref_neg))
-        log_mix_neg = torch.log(
-            lambda_ * torch.exp(log_pi_neg) +
-            (1 - lambda_) * torch.exp(log_ref_neg)
+        
+        # Стабильная версия log-sum-exp
+        max_log_neg = torch.max(log_pi_neg, log_ref_neg)
+        log_mix_neg = max_log_neg + torch.log(
+            lambda_ * torch.exp(log_pi_neg - max_log_neg) +
+            (1 - lambda_) * torch.exp(log_ref_neg - max_log_neg)
         )
-
         # BDPO-advantage и loss
         #    advantage = β·(log_pi_pos - log_mix_neg) - β·(log_ref_pos - log_ref_neg)
         advantage = beta * (log_pi_pos - log_mix_neg) - beta * (log_ref_pos - log_ref_neg)

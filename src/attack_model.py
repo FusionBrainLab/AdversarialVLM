@@ -1,7 +1,7 @@
 import sys
-from typing import Optional, Union 
 sys.path = [p for p in sys.path if p != '/home/jovyan/.imgenv-razzhigaev-small-1-0/lib/python3.7/site-packages'] 
 
+from typing import Optional, Union
 from datetime import datetime
 import torch
 import torch.nn.functional as F
@@ -416,7 +416,7 @@ def train(
         if clamp_method == 'tanh':
             x = epsilon * torch.tanh(p)
         
-        ## Apply gaussian blur to trained x and save it later 
+        # Apply gaussian blur to trained x and save it later 
         if use_gaussian_blur:
             x = gaussian_blur(x)
         
@@ -463,7 +463,7 @@ def train(
         grad_norm = p.grad.norm() if clamp_method == 'tanh' else x.grad.norm()
         
         # Проверка градиентов на первой итерации
-        if iteration == 0:
+        if iteration < 10:
             if clamp_method == 'tanh':
                 print(f"Gradients working! p.grad norm: {grad_norm.item():.6f}")
                 print(f"p.grad is not None: {p.grad is not None}")
@@ -480,7 +480,6 @@ def train(
             scheduler.step()  # Update the learning rate according to the scheduler
             
             # Optional: Print/log the accumulated loss and gradient norm
-            # print(f"Step {global_iteration}, Accumulated Loss: {accumulated_loss}, Grad Norm: {grad_norm.item()}")
             logger.add_scalar("accumulated_loss", accumulated_loss, global_iteration)
             accumulated_loss = 0  # Reset accumulated loss for the next round
             global_iteration += 1
@@ -545,10 +544,11 @@ def train(
                 inputs_processors=[inputs_processor],
                 model_names=[model_name],
                 not_safe_questions_test=not_safe_questions_test,
-                target_text=inputs_processor.target_texts[0],
+                target_text=random_text,
                 exp_path=exp_path,
                 iteration=iteration,
-                img=img
+                img=img,
+                streams=None
             )
             
             print("Question:", models_output[0])
@@ -647,10 +647,10 @@ def main():
         grad_accum_steps=args.grad_accum_steps,
         scheduler_step_size=args.scheduler_step_size,
         scheduler_gamma=args.scheduler_gamma,
-        restart_num=args.restart_num,              # Passed new argument
-        mask_type=args.mask_type,                  # Passed new argument
-        mask_size=args.mask_size,                  # Passed new argument
-        clamp_method=args.clamp_method,            # Passed new argument
+        restart_num=args.restart_num,
+        mask_type=args.mask_type,
+        mask_size=args.mask_size,
+        clamp_method=args.clamp_method,
         epsilon=args.epsilon,
         sigma=args.sigma,
         start_from_white=args.start_from_white,

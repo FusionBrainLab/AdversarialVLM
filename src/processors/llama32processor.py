@@ -13,7 +13,7 @@ from PIL import Image
 
 def load_model_and_processor(model_name, device):
     """Load the model and processor."""
-    model = MllamaForConditionalGeneration.from_pretrained(model_name).half().to(device)
+    model = MllamaForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
     processor = MllamaProcessor.from_pretrained(model_name, padding_side='left')
     return model, processor
 
@@ -313,9 +313,12 @@ class AdvMllamaInputs:
         # ---------------------- BDPO objective ----------------------
         # Вычисление log-mixture для отрицательных
         #   log π_mix(y_l) = log(λ·exp(log_pi_neg) + (1-λ)·exp(log_ref_neg))
-        log_mix_neg = torch.log(
-            lambda_ * torch.exp(log_pi_neg) +
-            (1 - lambda_) * torch.exp(log_ref_neg)
+       
+        # Стабильная версия log-sum-exp
+        max_log_neg = torch.max(log_pi_neg, log_ref_neg)
+        log_mix_neg = max_log_neg + torch.log(
+            lambda_ * torch.exp(log_pi_neg - max_log_neg) +
+            (1 - lambda_) * torch.exp(log_ref_neg - max_log_neg)
         )
 
         # BDPO-advantage и loss
@@ -447,6 +450,7 @@ class DifferentiableMllamaImageProcessor():
         batch_size = len(batch_images)
         max_num_images = max([len(images) for images in batch_images])
         shapes = [image.shape for images in batch_images for image in images]
+
         _, channels, tile_height, tile_width = shapes[0]
 
         # Initialize the stacked images array with zeros
@@ -531,7 +535,7 @@ class DifferentiableMllamaImageProcessor():
         for image in image_list:
             data_list.append([self.process(image)["pixel_values"]])
 
-        images, num_tiles = self.pack_images(data_list, self.max_image_tiles)
+        images, num_tiles = self.pack_images(data_list)
 
         return {
             "pixel_values": images,

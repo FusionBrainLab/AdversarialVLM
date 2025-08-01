@@ -261,9 +261,12 @@ class AdvQwen2VLInputs:
         # ---------------------- BDPO objective ----------------------
         # Вычисление log-mixture для отрицательных
         #   log π_mix(y_l) = log(λ·exp(log_pi_neg) + (1-λ)·exp(log_ref_neg))
-        log_mix_neg = torch.log(
-            lambda_ * torch.exp(log_pi_neg) +
-            (1 - lambda_) * torch.exp(log_ref_neg)
+        
+        # Стабильная версия log-sum-exp
+        max_log_neg = torch.max(log_pi_neg, log_ref_neg)
+        log_mix_neg = max_log_neg + torch.log(
+            lambda_ * torch.exp(log_pi_neg - max_log_neg) +
+            (1 - lambda_) * torch.exp(log_ref_neg - max_log_neg)
         )
 
         # BDPO-advantage и loss
