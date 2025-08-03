@@ -205,10 +205,10 @@ class AdvLlavaInputs:
         inputs_neg = self.get_inputs_refuse()
         
         # Add adversarial pixel values for policy
-        repeat_size = len(adv_pixel_values.shape)*[1]
-        repeat_size[0] = self.batch_size
-        adv_pixel_values_repeated = adv_pixel_values.repeat(repeat_size)
-        ref_pixel_values_repeated = ref_pixel_values.repeat(repeat_size)
+        # repeat_size = len(adv_pixel_values.shape)*[1]
+        # repeat_size[0] = self.batch_size
+        adv_pixel_values_repeated = adv_pixel_values# .repeat(repeat_size)
+        ref_pixel_values_repeated = ref_pixel_values# .repeat(repeat_size)
         
         inputs_pos['pixel_values'] = adv_pixel_values_repeated
         inputs_neg['pixel_values'] = adv_pixel_values_repeated
@@ -271,16 +271,32 @@ class AdvLlavaInputs:
         ).squeeze(-1).sum(dim=1)
         
         # ---------------------- BDPO objective ----------------------
-        # Вычисление log-mixture для отрицательных
+        # Вычисление log-mixture для отрицательных с численной стабильностью
+        # Используем log-sum-exp трюк для предотвращения underflow/overflow
         #   log π_mix(y_l) = log(λ·exp(log_pi_neg) + (1-λ)·exp(log_ref_neg))
-        log_mix_neg = torch.log(
-            lambda_ * torch.exp(log_pi_neg) +
-            (1 - lambda_) * torch.exp(log_ref_neg)
+        
+        # Стабильная версия log-sum-exp
+        max_log_neg = torch.max(log_pi_neg, log_ref_neg)
+        log_mix_neg = max_log_neg + torch.log(
+            lambda_ * torch.exp(log_pi_neg - max_log_neg) +
+            (1 - lambda_) * torch.exp(log_ref_neg - max_log_neg)
         )
 
         # BDPO-advantage и loss
         #    advantage = β·(log_pi_pos - log_mix_neg) - β·(log_ref_pos - log_ref_neg)
         advantage = beta * (log_pi_pos - log_mix_neg) - beta * (log_ref_pos - log_ref_neg)
+        
+        # Проверка на NaN и inf для отладки
+        if torch.isnan(advantage).any() or torch.isinf(advantage).any():
+            print(f"Warning: advantage contains NaN or inf values!")
+            print(f"log_pi_pos range: [{log_pi_pos.min():.4f}, {log_pi_pos.max():.4f}]")
+            print(f"log_mix_neg range: [{log_mix_neg.min():.4f}, {log_mix_neg.max():.4f}]")
+            print(f"log_ref_pos range: [{log_ref_pos.min():.4f}, {log_ref_pos.max():.4f}]")
+            print(f"log_ref_neg range: [{log_ref_neg.min():.4f}, {log_ref_neg.max():.4f}]")
+            # Заменяем NaN и inf на большие отрицательные значения для стабильности
+            advantage = torch.where(torch.isnan(advantage) | torch.isinf(advantage), 
+                                  torch.full_like(advantage, -100.0), advantage)
+        
         bdpo_loss = -F.logsigmoid(advantage)
 
         return bdpo_loss.mean()

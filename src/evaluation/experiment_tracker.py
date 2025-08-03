@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import re
 from collections import defaultdict
+import json
 
 
 class ExperimentTracker:
@@ -19,6 +20,7 @@ class ExperimentTracker:
     - Результатах тестирования на SafeBench
     - Графиках изменения ASR
     - Оценка безопасности
+    - Конфигурации запусков
     """
     
     def __init__(self, runs_dir: str = "./runs", tests_dir: str = "./tests"):
@@ -446,8 +448,21 @@ class ExperimentTracker:
             df = pd.read_csv(test_file)
             print(f"Загружен файл: {test_file}")
             print(f"Размер: {df.shape[0]} вопросов, {df.shape[1]-1} моделей")
+                    
+            # Для каждой строки df нужно во вторую ячейку добавить первую с выкинутым текстом первой
+            if df.shape[1] >= 2:
+                first_col = df.columns[0]
+                second_col = df.columns[1]
+                def add_question_to_second(row):
+                    val1 = str(row[first_col])
+                    val2 = str(row[second_col])
+                    idx = val2.find(val1)
+                    if idx != -1:
+                        val2 = val2[idx + len(val1):]
+                    return val2
+                df[second_col] = df.apply(add_question_to_second, axis=1)
             return df
-            
+        
         except Exception as e:
             print(f"Ошибка при загрузке файла {test_file}: {e}")
             return None
@@ -590,3 +605,35 @@ class ExperimentTracker:
                 })
         
         return pd.DataFrame(summary_data) 
+
+    def load_run_config(self, exp_name: str) -> Optional[Dict]:
+        """
+        Загружает конфигурацию запуска эксперимента из config.json.
+        
+        Args:
+            exp_name: Имя эксперимента
+            
+        Returns:
+            Словарь с конфигурацией или None если файл не найден
+        """
+        if exp_name not in self.runs_experiments:
+            print(f"Эксперимент {exp_name} не найден в runs/")
+            return None
+            
+        exp_dir = self.runs_experiments[exp_name]['path']
+        config_file = exp_dir / "config.json"
+        
+        if not config_file.exists():
+            print(f"Файл конфигурации не найден: {config_file}")
+            return None
+            
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            print(f"Загружена конфигурация: {config_file}")
+            return config
+            
+        except (json.JSONDecodeError, FileNotFoundError, UnicodeDecodeError) as e:
+            print(f"Ошибка при загрузке конфигурации {config_file}: {e}")
+            return None 

@@ -43,10 +43,15 @@ MODEL_MAP = {
         "module": "processors.gemma3processor",
         "input_class": "AdvGemma3Inputs",
         "processor_class": None,
-    }
+    },
+    "Lexius/Phi-3.5-vision-instruct": {
+        "module": "processors.phi3processor",
+        "input_class": "AdvPhiInputs",
+        "processor_class": "DifferentiablePhi3VImageProcessor",
+    },
 }
 
-def load_components(model_name: str) -> Tuple[object, object, object]:
+def load_components(model_name: str, any_support: bool = False) -> Tuple[object, object, object]:
     """
     Загружает load_model_and_processor, AdvInputs и DifferentiableImageProcessor 
     на основе названия весов модели.
@@ -55,22 +60,28 @@ def load_components(model_name: str) -> Tuple[object, object, object]:
     :return: Tuple из функций/классов: (load_model_and_processor, AdvInputs, DifferentiableImageProcessor).
     :raises ValueError: Если модель не найдена в карте.
     """
-    if model_name not in MODEL_MAP:
-        raise ValueError(f"Model {model_name} not found in MODEL_MAP. Please add it to the map.")
+    # if model_name not in MODEL_MAP:
+    #     raise ValueError(f"Model {model_name} not found in MODEL_MAP. Please add it to the map.")
 
-    model_info = MODEL_MAP[model_name]
-    module_name = model_info["module"]
+    if model_name in MODEL_MAP and not any_support:
+        model_info = MODEL_MAP[model_name]
+        module_name = model_info["module"]
     
-    # Импортируем модуль через importlib
-    module = importlib.import_module(module_name)
+        # Импортируем модуль через importlib
+        module = importlib.import_module(module_name)
 
-    # Получаем необходимые компоненты
-    load_model_and_processor = getattr(module, "load_model_and_processor")
-    AdvInputs = getattr(module, model_info["input_class"])
-    if model_info["processor_class"] is not None:
-        DifferentiableImageProcessor = getattr(module, model_info["processor_class"])
+        # Получаем необходимые компоненты
+        load_model_and_processor = getattr(module, "load_model_and_processor")
+        AdvInputs = getattr(module, model_info["input_class"])
+        if model_info["processor_class"] is not None:
+            DifferentiableImageProcessor = getattr(module, model_info["processor_class"])
+        else:
+            # i.e. inference only 
+            DifferentiableImageProcessor = None
     else:
-        # i.e. inference only 
-        DifferentiableImageProcessor = None
+        load_model_and_processor = load_model_and_processor_any
+        AdvInputs = AdvAnyInputs
+        DifferentiableImageProcessor = DifferentiableAnyImageProcessor
+        
 
     return load_model_and_processor, AdvInputs, DifferentiableImageProcessor

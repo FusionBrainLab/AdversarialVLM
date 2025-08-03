@@ -71,16 +71,50 @@ exps = [
     # "gray_crossattack_llama_qwen_llava_localization_20250518_010005",
     # "gray_crossattack_phi_llama_llava_localization_20250518_012640",
     # "gray_crossattack_phi_llama_qwen_llava_20250518_203800",
-    "gray_crossattack_phi_llama_qwen_llava_MA_20250518_202524"
-
+    # "gray_crossattack_phi_llama_qwen_llava_MA_20250518_202524",
+    # "gray_dpo_attack_LlaVA-1.5-7B_20250731_044412", # b = 0.3
+    # "gray_dpo_attack_LlaVA-1.5-7B_20250730_101257", # b = 3.3
+    # "gray_dpo_attack_LlaVA-1.5-7B_nograd_20250731_055543", # b = 0.1
+    # "gray_Llama-dpo_20250731_060351", # b = 0.3 
+    "gray_dpo_attack_LlaVA-1.5-7B_nograd_20250731_081242", # b = 0.3
+    # "gray_Qwen2-VL-2B_dpo_20250731_081242", # b=0.3
+    # "gray_Llama-dpo_20250731_060351", 
+    # "gray_gemma-3-4b-it_20250730_071800",
+    # "gray_LlaVA-1.5-7B_test_any_20250731_045913",
+    # "gray_LlaVA-1.5-7B_test_any_20250730_085208",
+    # "gray_dpo_attack_LlaVA-1.5-7B_bdpo_20250731_123954",
+    # "gray_Qwen2-VL-2B_bdpo_b03_l03_20250731_140356",
+    # "gray_crossattack_llama_qwen_llava_stream_0.4_20250731_210955",
+    # "gray_dpo_attack_LlaVA-1.5-7B_bdpo_b04_l07_20250731_212911",
+    # "gray_crossattack_phi_llama_qwen_0.4_20250731_173634",
+    # "gray_Llama-bdpo-b03-l03_20250731_214655",
+    # "gray_Phi-3.5_dpo_b0.3_l1_20250731_224041",
+    # "gray_Phi-3.5_dpo_b0.3_l1_20250731_232455",
+    # "gray_crossattack_llama_qwen_llava_stream_pcgrag_0.4_20250801_013034",
+    # "gray_Llama-bdpo-b03-l07_20250801_025141",
+    # "gray_Llama-bdpo-b03-l03_20250801_051607",
+    # "gray_crossattack_phi_llama_qwen_llava_stream_pcgrag_20250801_044924",
+    # "gray_Llama-bdpo-b03-l03-ma_20250801_064834",
+    # "gray_Phi-3.5_dpo_b0.3_l0.3-ma_20250801_064933",
+    # "gray_dpo_attack_LlaVA-1.5-7B_bdpo_b03_l03-ma_20250801_064851",
+    # "gray_Qwen2-VL-2B_bdpo_b03_l03-ma_20250801_065023",
+    # "gray_crossattack_llama_qwen_llava_stream_pcgrag_0.4_20250801_021526",
+    # "gray_Phi-3.5_dpo_b0.3_l1_20250731_224041",
+    # "gray_Llama-bdpo-b03-l03_20250731_214655",
+    # "gray_Llama-bdpo-b03-l07_20250801_025141",
+    # "gray_Phi-3.5_dpo_b0.3_l1_20250731_232455",
+    # "gray_Llama-bdpo-b03-l03-ma_20250801_064834",
+    # "gray_Llama-bdpo-b03-l07_20250801_025141 "
+    "gray_Llama-bdpo-b03-l03_20250802_054053",
+    "gray_Phi-3.5-MA-vs-test_20250116_182955"
 ]
 
 runs_path = "/home/jovyan/rahmatullaev/adversarial/runs/"
 
 judge_model_name = "google/gemma-3-4b-it"
 device = "cuda:0"
-# dtype = 'bfloat16'
-dtype = 'float32'
+dtype = 'bfloat16'
+# dtype = 'float32'
 
 checker = SafetyChecker(judge_model_name, device, dtype)
 BATCH_SIZE = 16  # how many texts to process per model inference call
@@ -128,7 +162,27 @@ for exp in exps:
             # check if the safety details file already exists
             safety_details_path = os.path.join(safety_details_dir, judge_model_name.split("/")[-1], f"safety_details_iter_{iteration_num}.csv")
             if os.path.exists(safety_details_path):
-                print(f"Skipping {filename} because it already exists")
+                # print(f"Loading existing safety details for {filename}")
+                # Load existing safety details and extract statistics
+                existing_safety = pd.read_csv(safety_details_path, sep=";")
+                
+                # Calculate unsafe counts for each model from existing data
+                model_columns = iter_data.columns[1:]  # Skip first column (questions)
+                for m_col in model_columns:
+                    model_data = existing_safety[existing_safety['model'] == m_col]
+                    if not model_data.empty:
+                        # Count unsafe cases (is_safe == False) 
+                        unsafe_count = len(model_data[model_data['is_safe'] == False])
+                        total_count = len(model_data)
+                        unsafe_fraction = unsafe_count / total_count if total_count > 0 else 0
+                        data_rows.append((iteration_num, m_col, unsafe_fraction))
+                
+                # Calculate mean across all models
+                if model_columns.size > 0:
+                    recent_entries = data_rows[-len(model_columns):]
+                    mean_value = sum([entry[2] for entry in recent_entries]) / len(recent_entries)
+                    data_rows.append((iteration_num, "ALL_MODELS_MEAN", mean_value))
+                
                 continue
 
             # We'll read the questions from the first column
@@ -222,7 +276,19 @@ for exp in exps:
         # Save to CSV with rows = iteration, columns = model
         output_csv_path = os.path.join(runs_path, exp, "unsafe_metrics_models.csv")
         pivot_df.to_csv(output_csv_path, index=True)
+        if os.path.exists(output_csv_path):
+            print(f"Saved {output_csv_path}")
+        else:
+            print(f"Failed to save {output_csv_path}")
 
+        # save the pivot_df to a json file
+        pivot_df.to_json(os.path.join(runs_path, exp, "unsafe_metrics_models.json"), orient="records")
+        if os.path.exists(os.path.join(runs_path, exp, "unsafe_metrics_models.json")):
+            print(f"Saved {os.path.join(runs_path, exp, 'unsafe_metrics_models.json')}")
+        else:
+            print(f"Failed to save {os.path.join(runs_path, exp, 'unsafe_metrics_models.json')}")
+
+        # save the pivot_df to a json file
         # Find best iteration among "ALL_MODELS_MEAN"
         # We can query pivot_df["ALL_MODELS_MEAN"] directly if that column exists
         if "ALL_MODELS_MEAN" in pivot_df.columns:

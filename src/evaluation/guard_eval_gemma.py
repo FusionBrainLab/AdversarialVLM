@@ -4,8 +4,9 @@ import torch
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-project_root = os.path.abspath("/home/jovyan/rahmatullaev/adversarial/src")
+project_root = os.path.abspath("./")
 sys.path.append(project_root)
+print(project_root)
 
 from src.processors import load_components
 from src.judge.safety_checker import SafetyChecker
